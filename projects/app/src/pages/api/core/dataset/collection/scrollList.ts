@@ -91,6 +91,8 @@ async function handler(
       list: await Promise.all(
         collections.map(async (item) => ({
           ...item,
+          // 旧版仅读取 string 格式标签（ObjectId），兼容 tags 混合格式
+          tags: (item.tags ?? []).filter((tag): tag is string => typeof tag === 'string'),
           dataAmount: 0,
           trainingAmount: 0,
           ...defaultCollectionTrainingStatus,
@@ -178,6 +180,8 @@ async function handler(
   const data = await Promise.all(
     collections.map(async (item) => ({
       ...item,
+      // 旧版仅读取 string 格式标签（ObjectId），兼容 tags 混合格式
+      tags: (item.tags ?? []).filter((tag): tag is string => typeof tag === 'string'),
       permission
     }))
   );

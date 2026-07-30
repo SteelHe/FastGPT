@@ -15,7 +15,20 @@ export enum DatasetErrEnum {
   notSupportSync = 'notSupportSync',
   sameApiCollection = 'sameApiCollection',
   noApiServer = 'noApiServer',
-  canNotEditAdminPermission = 'canNotEditAdminPermission'
+  canNotEditAdminPermission = 'canNotEditAdminPermission',
+
+  // Tag errors (501013+)
+  tagNameDuplicate = 'tagNameDuplicate',
+  tagNameEmpty = 'tagNameEmpty',
+  tagNotExist = 'tagNotExist',
+  tagValueInvalid = 'tagValueInvalid',
+  tagValueStringTooLong = 'tagValueStringTooLong',
+  tagValueNumberOutOfRange = 'tagValueNumberOutOfRange',
+  tagValueDatetimeInvalid = 'tagValueDatetimeInvalid',
+  noDatasetForTagFilter = 'noDatasetForTagFilter',
+  noTagsInDataset = 'noTagsInDataset',
+  noPermissionForDatasetTags = 'noPermissionForDatasetTags',
+  tagNotSelectedForRef = 'tagNotSelectedForRef'
 }
 const datasetErr = [
   {
@@ -69,6 +82,52 @@ const datasetErr = [
   {
     statusText: DatasetErrEnum.noApiServer,
     message: i18nT('common:core.dataset.error.noApiServer')
+  },
+
+  // Tag errors
+  {
+    statusText: DatasetErrEnum.tagNameDuplicate,
+    message: i18nT('common:core.dataset.error.tagNameDuplicate')
+  },
+  {
+    statusText: DatasetErrEnum.tagNameEmpty,
+    message: i18nT('common:core.dataset.error.tagNameEmpty')
+  },
+  {
+    statusText: DatasetErrEnum.tagNotExist,
+    message: i18nT('common:core.dataset.error.tagNotExist')
+  },
+  {
+    statusText: DatasetErrEnum.tagValueInvalid,
+    message: i18nT('common:core.dataset.error.tagValueInvalid')
+  },
+  {
+    statusText: DatasetErrEnum.tagValueStringTooLong,
+    message: i18nT('common:core.dataset.error.tagValueStringTooLong')
+  },
+  {
+    statusText: DatasetErrEnum.tagValueNumberOutOfRange,
+    message: i18nT('common:core.dataset.error.tagValueNumberOutOfRange')
+  },
+  {
+    statusText: DatasetErrEnum.tagValueDatetimeInvalid,
+    message: i18nT('common:core.dataset.error.tagValueDatetimeInvalid')
+  },
+  {
+    statusText: DatasetErrEnum.noDatasetForTagFilter,
+    message: i18nT('common:core.dataset.error.noDatasetForTagFilter')
+  },
+  {
+    statusText: DatasetErrEnum.noTagsInDataset,
+    message: i18nT('common:core.dataset.error.noTagsInDataset')
+  },
+  {
+    statusText: DatasetErrEnum.noPermissionForDatasetTags,
+    message: i18nT('common:core.dataset.error.noPermissionForDatasetTags')
+  },
+  {
+    statusText: DatasetErrEnum.tagNotSelectedForRef,
+    message: i18nT('common:core.dataset.error.tagNotSelectedForRef')
   }
 ];
 export default datasetErr.reduce((acc, cur, index) => {

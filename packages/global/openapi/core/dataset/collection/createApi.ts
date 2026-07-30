@@ -19,7 +19,12 @@ const DatasetCollectionStoreDataSchema = ChunkSettingsSchema.extend({
 // API 创建集合通用基础 Schema
 export const ApiCreateCollectionBaseSchema = DatasetCollectionStoreDataSchema.extend({
   datasetId: z.string().meta({ description: '数据集 ID' }),
-  tags: z.array(z.string()).optional().meta({ description: '标签列表' })
+  tags: z
+    .array(
+      z.union([z.string(), z.object({ tag: z.string(), value: z.union([z.string(), z.number()]) })])
+    )
+    .optional()
+    .meta({ description: '标签列表' })
 });
 export type ApiCreateDatasetCollectionParams = z.infer<typeof ApiCreateCollectionBaseSchema>;
 
@@ -50,7 +55,12 @@ export const CreateCollectionBodySchema = z.object({
   type: z
     .enum([DatasetCollectionTypeEnum.folder, DatasetCollectionTypeEnum.virtual])
     .meta({ description: '集合类型（folder: 文件夹，virtual: 手动集合）' }),
-  tags: z.array(z.string()).optional().meta({ description: '标签列表' })
+  tags: z
+    .array(
+      z.union([z.string(), z.object({ tag: z.string(), value: z.union([z.string(), z.number()]) })])
+    )
+    .optional()
+    .meta({ description: '标签列表' })
 });
 export type CreateCollectionBodyType = z.infer<typeof CreateCollectionBodySchema>;
 
@@ -154,7 +164,13 @@ export type ImageCreateDatasetCollectionParams = z.infer<typeof CreateImageColle
 export const CreateImageCollectionDataSchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
   parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
-  collectionName: z.string().meta({ description: '集合名称' })
+  collectionName: z.string().meta({ description: '集合名称' }),
+  tags: z
+    .array(
+      z.union([z.string(), z.object({ tag: z.string(), value: z.union([z.string(), z.number()]) })])
+    )
+    .optional()
+    .meta({ description: '标签列表' })
 });
 export type CreateImageCollectionDataType = z.infer<typeof CreateImageCollectionDataSchema>;
 // handler 内 parse 用
@@ -179,7 +195,13 @@ export const CreateImageCollectionMultipartSchema = z.object({
 // handler 内 parse 用
 export const CreateBackupCollectionFormSchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
-  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' })
+  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  tags: z
+    .array(
+      z.union([z.string(), z.object({ tag: z.string(), value: z.union([z.string(), z.number()]) })])
+    )
+    .optional()
+    .meta({ description: '标签列表' })
 });
 export type CreateBackupCollectionFormType = z.infer<typeof CreateBackupCollectionFormSchema>;
 
@@ -197,7 +219,13 @@ export const CreateBackupCollectionMultipartSchema = z.object({
 // handler 内 parse 用
 export const CreateTemplateCollectionFormSchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
-  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' })
+  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  tags: z
+    .array(
+      z.union([z.string(), z.object({ tag: z.string(), value: z.union([z.string(), z.number()]) })])
+    )
+    .optional()
+    .meta({ description: '标签列表' })
 });
 export type CreateTemplateCollectionFormType = z.infer<typeof CreateTemplateCollectionFormSchema>;
 

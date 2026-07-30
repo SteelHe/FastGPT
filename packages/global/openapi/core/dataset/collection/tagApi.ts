@@ -1,4 +1,8 @@
 import z from 'zod';
+import {
+  DatasetCollectionTagTypeEnum,
+  CollectionTagValueSchema
+} from '../../../../core/dataset/type';
 
 /* ============================================================================
  * API: 创建集合标签
@@ -6,7 +10,10 @@ import z from 'zod';
  * ============================================================================ */
 export const CreateDatasetCollectionTagBodySchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
-  tag: z.string().meta({ description: '标签名称' })
+  tag: z.string().min(1).meta({ description: '标签名称' }),
+  tagType: DatasetCollectionTagTypeEnum.optional().meta({
+    description: '标签类型：string(默认)/number/datetime'
+  })
 });
 export type CreateDatasetCollectionTagParams = z.infer<typeof CreateDatasetCollectionTagBodySchema>;
 
@@ -31,6 +38,42 @@ export type AddTagsToCollectionsParams = z.infer<typeof AddTagsToCollectionsBody
 export const UpdateDatasetCollectionTagBodySchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
   tagId: z.string().meta({ description: '标签 ID' }),
-  tag: z.string().meta({ description: '新标签名称' })
+  tag: z.string().min(1).meta({ description: '新标签名称' })
 });
 export type UpdateDatasetCollectionTagParams = z.infer<typeof UpdateDatasetCollectionTagBodySchema>;
+
+/* ============================================================================
+ * API: 批量 Upsert 标签
+ * Route: POST /proApi/core/dataset/tag/batchUpsert
+ * ============================================================================ */
+export const BatchUpsertTagItemSchema = z.object({
+  tag: z.string().min(1).meta({ description: '标签名称' }),
+  tagType: DatasetCollectionTagTypeEnum.optional().meta({ description: '标签类型' })
+});
+export const BatchUpsertTagsBodySchema = z.object({
+  datasetId: z.string().meta({ description: '数据集 ID' }),
+  tags: z.array(BatchUpsertTagItemSchema).min(1).meta({ description: '标签列表' })
+});
+export type BatchUpsertTagsParams = z.infer<typeof BatchUpsertTagsBodySchema>;
+
+/* ============================================================================
+ * API: 设置单个 Collection 标签值
+ * Route: POST /proApi/core/dataset/tag/setCollectionTags
+ * ============================================================================ */
+export const SetCollectionTagsBodySchema = z.object({
+  datasetId: z.string().meta({ description: '数据集 ID' }),
+  collectionId: z.string().meta({ description: '集合 ID' }),
+  tags: z.array(CollectionTagValueSchema).meta({ description: '标签值列表' })
+});
+export type SetCollectionTagsParams = z.infer<typeof SetCollectionTagsBodySchema>;
+
+/* ============================================================================
+ * API: 批量设置 Collection 标签值
+ * Route: POST /proApi/core/dataset/tag/batchSetCollectionTags
+ * ============================================================================ */
+export const BatchSetCollectionTagsBodySchema = z.object({
+  datasetId: z.string().meta({ description: '数据集 ID' }),
+  collectionIds: z.array(z.string()).min(1).meta({ description: '集合 ID 列表' }),
+  tags: z.array(CollectionTagValueSchema).meta({ description: '标签值列表' })
+});
+export type BatchSetCollectionTagsParams = z.infer<typeof BatchSetCollectionTagsBodySchema>;
