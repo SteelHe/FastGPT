@@ -226,7 +226,8 @@ vi.mock('@fastgpt/service/common/s3/sources/dataset/index', () => ({
       fields: { key: 'mock-key' },
       maxSize: 500 * 1024 * 1024
     }),
-    deleteDatasetFile: vi.fn().mockResolvedValue(undefined)
+    deleteDatasetFile: vi.fn().mockResolvedValue(undefined),
+    deleteDatasetFilesByKeys: vi.fn().mockResolvedValue(undefined)
   })),
   S3DatasetSource: vi.fn()
 }));

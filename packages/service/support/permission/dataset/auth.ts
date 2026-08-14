@@ -8,12 +8,17 @@ import {
 import { getTmbInfoByTmbId } from '../../user/team/controller';
 import { MongoDataset } from '../../../core/dataset/schema';
 import {
+  ManageRoleVal,
   NullPermissionVal,
   NullRoleVal,
-  PerResourceTypeEnum
+  OwnerRoleVal,
+  PerResourceTypeEnum,
+  ReadPermissionVal
 } from '@fastgpt/global/support/permission/constant';
 import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
 import { DatasetPermission } from '@fastgpt/global/support/permission/dataset/controller';
+import { CollectionPermission } from '@fastgpt/global/support/permission/collection/controller';
+import { resolveCollectionPermission } from '../collection/resolvePermission';
 import { getCollectionWithDataset } from '../../../core/dataset/controller';
 import { MongoDatasetData } from '../../../core/dataset/data/schema';
 import { type AuthModeType, type AuthResponseType } from '../type';
@@ -134,7 +139,7 @@ export const authDataset = async ({
   };
 };
 
-// the temporary solution for authDatasetCollection is getting the
+// 先校验 Dataset read 门槛，再按 Collection 维度解析有效权限并校验 per。
 export async function authDatasetCollection({
   collectionId,
   per = NullPermissionVal,
@@ -143,7 +148,7 @@ export async function authDatasetCollection({
   collectionId: string;
   isRoot?: boolean;
 }): Promise<
-  AuthResponseType<DatasetPermission> & {
+  AuthResponseType<CollectionPermission> & {
     collection: CollectionWithDatasetType;
   }
 > {
@@ -154,10 +159,11 @@ export async function authDatasetCollection({
     return Promise.reject(DatasetErrEnum.unExist);
   }
 
+  // 1. Dataset read 门槛：Collection 权限不能绕过 Dataset 权限
   const { dataset } = await authDatasetByTmbId({
     tmbId,
     datasetId: collection.datasetId,
-    per,
+    per: ReadPermissionVal,
     isRoot: isRootFromHeader
   });
 
@@ -166,12 +172,75 @@ export async function authDatasetCollection({
     return Promise.reject(DatasetErrEnum.unAuthDataset);
   }
 
+  // 系统 root 用户：与 Dataset 级 isRoot 语义一致，跳过 Collection 级权限解析。
+  if (isRootFromHeader) {
+    return {
+      userId,
+      teamId,
+      tmbId,
+      collection,
+      permission: new CollectionPermission({ isOwner: true }),
+      isRoot: isRootFromHeader
+    };
+  }
+
+  // 2. 团队 owner/admin 旁路（短路语义，Error-1 修复）：
+  //    Dataset read 门槛已通过。团队 owner/admin 对该 Dataset 下所有 Collection 视为可读/管理，
+  //    与 listV2 短路保持一致，避免「列表可见但点进去无权限」。
+  //    该旁路不改变「仅 collection 权限不能绕过 Dataset read」门槛：必须先通过上面第 1 步。
+  const tmbInfo = await getTmbInfoByTmbId({ tmbId });
+  const isTeamOwnerOrAdmin =
+    String(tmbInfo.teamId) === String(teamId) &&
+    (tmbInfo.permission.isOwner || tmbInfo.permission.hasManagePer);
+
+  // 3. 短路：Dataset 显式 `hasSetCollectionPermissions=false`（纯继承）→
+  //    Collection 有效权限直接等于 Dataset 有效权限（父 owner 不透传，cap 为 manage）。
+  //    对普通成员：`dataset.permission.role` 即其 Dataset 有效角色（不可能是 owner），
+  //    与 `resolveCollectionPermission`（父级贡献 + 自身 owner 记录，纯继承时仅 owner 记录）
+  //    结果完全一致；collection owner（创建者）额外获得 owner。
+  //    仅 Collection 权限仍不能绕过上面第 1 步的 Dataset read 门槛。
+  //    注意：仅**显式 false** 触发短路；旧数据字段缺失（undefined）视为未知，走完整解析，
+  //    避免对已存在的非继承态 Collection 错误放行（正确性优先，迁移后统一为显式 false）。
+  const flagSetCollectionPermissions = dataset.hasSetCollectionPermissions;
+
+  // 4. Collection 维度解析：自身 clbs + 父级贡献（folder 快照 / 根级 Dataset），
+  //    父级 owner 至多映射为 manage。
+  let role: PermissionValueType;
+  if (isTeamOwnerOrAdmin) {
+    role = ManageRoleVal;
+  } else if (flagSetCollectionPermissions === false) {
+    const isCollectionOwner = String(collection.tmbId) === String(tmbId);
+    const datasetRole = dataset.permission.role;
+    role =
+      datasetRole === OwnerRoleVal ? ManageRoleVal : isCollectionOwner ? OwnerRoleVal : datasetRole;
+  } else {
+    role = await resolveCollectionPermission({
+      collection,
+      tmbId,
+      teamId,
+      groupIds: [],
+      orgIds: [],
+      datasetPermission: dataset.permission.role
+    });
+  }
+
+  const isOwner = String(collection.tmbId) === String(tmbId);
+
+  const permission = new CollectionPermission({
+    role,
+    isOwner
+  });
+
+  if (!permission.checkPer(per)) {
+    return Promise.reject(DatasetErrEnum.unAuthDatasetCollection);
+  }
+
   return {
     userId,
     teamId,
     tmbId,
     collection,
-    permission: dataset.permission,
+    permission,
     isRoot: isRootFromHeader
   };
 }

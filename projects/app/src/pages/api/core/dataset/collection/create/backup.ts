@@ -28,7 +28,9 @@ async function handler(req: ApiRequestProps) {
     });
     filepaths.push(result.fileMetadata.path);
     const filename = decodeURIComponent(result.fileMetadata.originalname);
-    const { datasetId, parentId } = CreateBackupCollectionFormSchema.parse(result.data);
+    const { datasetId, parentId, inheritPermission } = CreateBackupCollectionFormSchema.parse(
+      result.data
+    );
 
     if (!isCSVFile(filename)) {
       return Promise.reject('File must be a CSV file');
@@ -77,6 +79,7 @@ async function handler(req: ApiRequestProps) {
         tmbId,
         datasetId: dataset._id,
         parentId,
+        inheritPermission,
         name: filename,
         type: DatasetCollectionTypeEnum.file,
         fileId,

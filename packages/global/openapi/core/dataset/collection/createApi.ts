@@ -12,6 +12,7 @@ import { APIFileItemSchema } from '../../../../core/dataset/apiDataset/type';
 // 集合存储数据基础 Schema（扩展自 ChunkSettings）
 const DatasetCollectionStoreDataSchema = ChunkSettingsSchema.extend({
   parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  inheritPermission: z.boolean().optional().meta({ description: '是否继承父级权限，默认 true' }),
   metadata: z.record(z.string(), z.any()).optional().meta({ description: '元数据' }),
   customPdfParse: z.boolean().optional().meta({ description: '自定义 PDF 解析' })
 });
@@ -46,6 +47,7 @@ export type CreateCollectionWithResultResponseType = z.infer<
 export const CreateCollectionBodySchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
   parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  inheritPermission: z.boolean().optional().meta({ description: '是否继承父级权限，默认 true' }),
   name: z.string().meta({ description: '集合名称' }),
   type: z
     .enum([DatasetCollectionTypeEnum.folder, DatasetCollectionTypeEnum.virtual])
@@ -154,6 +156,7 @@ export type ImageCreateDatasetCollectionParams = z.infer<typeof CreateImageColle
 export const CreateImageCollectionDataSchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
   parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  inheritPermission: z.boolean().optional().meta({ description: '是否继承父级权限，默认 true' }),
   collectionName: z.string().meta({ description: '集合名称' })
 });
 export type CreateImageCollectionDataType = z.infer<typeof CreateImageCollectionDataSchema>;
@@ -179,7 +182,8 @@ export const CreateImageCollectionMultipartSchema = z.object({
 // handler 内 parse 用
 export const CreateBackupCollectionFormSchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
-  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' })
+  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  inheritPermission: z.boolean().optional().meta({ description: '是否继承父级权限，默认 true' })
 });
 export type CreateBackupCollectionFormType = z.infer<typeof CreateBackupCollectionFormSchema>;
 
@@ -201,7 +205,8 @@ export const CreateBackupCollectionMultipartSchema = z.object({
 // handler 内 parse 用
 export const CreateTemplateCollectionFormSchema = z.object({
   datasetId: z.string().meta({ description: '数据集 ID' }),
-  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' })
+  parentId: ParentIdSchema.optional().meta({ description: '父级目录 ID' }),
+  inheritPermission: z.boolean().optional().meta({ description: '是否继承父级权限，默认 true' })
 });
 export type CreateTemplateCollectionFormType = z.infer<typeof CreateTemplateCollectionFormSchema>;
 

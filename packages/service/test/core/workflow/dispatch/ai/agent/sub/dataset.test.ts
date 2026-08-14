@@ -8,18 +8,24 @@ const {
   defaultSearchDatasetDataMock,
   filterDatasetsByTmbIdMock,
   findDatasetByIdMock,
-  formatModelChars2PointsMock
+  formatModelChars2PointsMock,
+  resolveReadableCollectionIdsMock
 } = vi.hoisted(() => ({
   countPromptTokensMock: vi.fn(),
   createLLMResponseMock: vi.fn(),
   defaultSearchDatasetDataMock: vi.fn(),
   filterDatasetsByTmbIdMock: vi.fn(),
   findDatasetByIdMock: vi.fn(),
-  formatModelChars2PointsMock: vi.fn()
+  formatModelChars2PointsMock: vi.fn(),
+  resolveReadableCollectionIdsMock: vi.fn()
 }));
 
 vi.mock('@fastgpt/service/core/dataset/search', () => ({
   defaultSearchDatasetData: defaultSearchDatasetDataMock
+}));
+
+vi.mock('@fastgpt/service/support/permission/collection/readableCollection', () => ({
+  resolveReadableCollectionIds: resolveReadableCollectionIdsMock
 }));
 
 vi.mock('@fastgpt/service/core/dataset/schema', async (importOriginal) => ({
@@ -76,6 +82,7 @@ describe('dispatchAgentDatasetSearch', () => {
       })
     });
     filterDatasetsByTmbIdMock.mockImplementation(async ({ datasetIds }) => datasetIds);
+    resolveReadableCollectionIdsMock.mockResolvedValue([]);
     countPromptTokensMock.mockResolvedValue(100);
     createLLMResponseMock.mockResolvedValue({
       answerText: '[chunk_2]',

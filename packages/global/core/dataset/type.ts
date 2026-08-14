@@ -72,6 +72,10 @@ export const DatasetSchema = z
     tmbId: ObjectIdSchema.meta({ description: '团队成员 ID' }),
     updateTime: z.coerce.date().meta({ description: '更新时间' }),
     inheritPermission: z.boolean().meta({ description: '继承权限' }),
+    hasSetCollectionPermissions: z.boolean().optional().meta({
+      description:
+        '是否配置过 Collection 级权限（独立/自定义），默认 false；false 时 collection 级鉴权可短路为 Dataset 级鉴权'
+    }),
 
     avatar: z.string().meta({ description: '头像' }),
     name: z.string().meta({ description: '名称' }),
@@ -129,6 +133,11 @@ export const DatasetCollectionSchema = ChunkSettingsSchema.omit({
   parentId: ParentIdSchema.meta({ description: '父级 ID' }),
   name: z.string().meta({ description: '名称' }),
   type: z.enum(DatasetCollectionTypeEnum).meta({ description: '集合类型' }),
+  inheritPermission: z.boolean().optional().meta({ description: '继承权限，默认 true' }),
+  permissionMigrationVersion: z
+    .number()
+    .optional()
+    .meta({ description: '集合权限迁移版本，用于断点续跑' }),
   tags: z.array(z.string()).optional().meta({ description: '标签' }),
 
   createTime: z.coerce.date().meta({ description: '创建时间' }),

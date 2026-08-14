@@ -17,6 +17,7 @@ import {
 } from '@fastgpt/global/support/permission/utils';
 import type { CollaboratorItemType } from '@fastgpt/global/support/permission/collaborator';
 import { pickCollaboratorIdFields } from './utils';
+import { syncDatasetCollectionFolders } from './collection/folderSync';
 import { getLogger, LogCategories } from '../../common/logger';
 
 export type SyncChildrenPermissionResourceType = {
@@ -206,13 +207,18 @@ export async function resumeInheritPermission({
   folderTypeList,
   resourceType,
   resourceModel,
-  session
+  session,
+  syncCollectionFolders = false
 }: {
   resource: SyncChildrenPermissionResourceType;
   folderTypeList: string[];
   resourceType: PerResourceTypeEnum;
   resourceModel: typeof Model;
   session?: ClientSession;
+  /** after resuming inherit, rebuild the Dataset's inherited Collection
+   *  Folder snapshots from the restored effective collaborators (parent + own merged).
+   *  Ordinary Collections stay dynamic and are not written. */
+  syncCollectionFolders?: boolean;
 }) {
   const logger = getLogger(LogCategories.MODULE.PERMISSION.INHERIT);
   const isFolder = folderTypeList.includes(resource.type);
@@ -277,6 +283,18 @@ export async function resumeInheritPermission({
       },
       { session }
     );
+
+    // rebuild the Dataset's inherited Collection Folder snapshots
+    // from the restored effective collaborators (`collaborators` = merge(parent, old own)).
+    // For a non-folder dataset this still applies (its own old clbs are kept).
+    if (syncCollectionFolders) {
+      await syncDatasetCollectionFolders({
+        teamId: resource.teamId,
+        datasetId: String(resource._id),
+        rootClbs: collaborators,
+        session
+      });
+    }
   };
 
   if (session) {

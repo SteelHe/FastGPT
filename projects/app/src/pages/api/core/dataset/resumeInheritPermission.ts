@@ -27,7 +27,10 @@ async function handler(req: ApiRequestProps<ResumeDatasetInheritPermissionBody>)
       resource: dataset,
       folderTypeList: [DatasetTypeEnum.folder],
       resourceType: PerResourceTypeEnum.dataset,
-      resourceModel: MongoDataset
+      resourceModel: MongoDataset,
+      // rebuild inherited Collection Folder snapshots from the restored
+      // effective collaborators after the dataset resumes inheritance.
+      syncCollectionFolders: true
     });
   } else {
     await MongoDataset.updateOne(

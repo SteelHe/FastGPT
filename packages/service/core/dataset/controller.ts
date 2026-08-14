@@ -11,6 +11,7 @@ import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
 import { retryFn } from '@fastgpt/global/common/system/utils';
 import { UserError } from '@fastgpt/global/common/error/utils';
 import { getS3DatasetSource } from '../../common/s3/sources/dataset';
+import { deleteCollectionPermissions } from '../../support/permission/collection/cleanup';
 
 /* ============= dataset ========== */
 /* find all datasetId by top datasetId */
@@ -114,6 +115,15 @@ export async function delDatasetRelevantData({
   await delCollectionRelatedSource({ collections });
   // Delete vector data
   await deleteDatasetDataVector({ teamId, datasetIds });
+
+  // clean the Collection permission records (resourceType=collection) in the
+  // same transaction that deletes the Collections themselves; a failure rolls everything
+  // back so no orphan resource_permissions records are left behind.
+  await deleteCollectionPermissions({
+    teamId,
+    collectionIds: collections.map((item) => String(item._id)),
+    session
+  });
 
   // delete collections
   await MongoDatasetCollection.deleteMany({

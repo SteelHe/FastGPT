@@ -42,6 +42,26 @@ const DatasetCollectionSchema = new Schema({
     type: String,
     required: true
   },
+  /**
+   * Whether the collection inherits permissions from its parent
+   * (Collection Folder or root Dataset). Defaults to true.
+   * When false, the collection only uses its own collaborator records.
+   */
+  inheritPermission: {
+    type: Boolean,
+    default: true
+  },
+  /**
+   * Collection permission migration version.
+   * Written by `migrateCollectionPermission` when a Collection has been fully
+   * migrated (snapshot / owner records rebuilt). Only Collections whose value is
+   * missing or lower than the current migration version are re-processed on a
+   * re-run, which makes the upgrade idempotent and supports resume-after-failure.
+   */
+  permissionMigrationVersion: {
+    type: Number,
+    default: undefined
+  },
   tags: {
     type: [String],
     default: []
@@ -103,6 +123,16 @@ defineIndex(DatasetCollectionSchema, {
     datasetId: 1,
     parentId: 1,
     updateTime: -1
+  }
+});
+
+// Scan inherited collection folders by inheritPermission
+defineIndex(DatasetCollectionSchema, {
+  key: {
+    teamId: 1,
+    datasetId: 1,
+    parentId: 1,
+    inheritPermission: 1
   }
 });
 

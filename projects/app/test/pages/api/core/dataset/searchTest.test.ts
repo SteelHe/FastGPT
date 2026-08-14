@@ -10,9 +10,14 @@ const mockUpdateApiKeyUsage = vi.hoisted(() => vi.fn());
 const mockGetRerankModel = vi.hoisted(() => vi.fn());
 const mockAddAuditLog = vi.hoisted(() => vi.fn());
 const mockCreateExternalUrl = vi.hoisted(() => vi.fn());
+const mockResolveReadableCollectionIds = vi.hoisted(() => vi.fn());
 
 vi.mock('@fastgpt/service/support/permission/dataset/auth', () => ({
   authDataset: mockAuthDataset
+}));
+
+vi.mock('@fastgpt/service/support/permission/collection/readableCollection', () => ({
+  resolveReadableCollectionIds: mockResolveReadableCollectionIds
 }));
 
 vi.mock('@fastgpt/service/support/permission/teamLimit', () => ({
@@ -74,6 +79,7 @@ describe('searchTest query image auth', () => {
       tmbId: 'tmb-1',
       userId: 'user-1'
     });
+    mockResolveReadableCollectionIds.mockResolvedValue([]);
     mockCheckTeamAIPoints.mockResolvedValue(undefined);
     mockGetRerankModel.mockReturnValue({
       model: 'mock-rerank-model'

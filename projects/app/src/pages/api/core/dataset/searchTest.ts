@@ -1,4 +1,5 @@
 import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
+import { resolveReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
 import { pushDatasetTestUsage } from '@/service/support/wallet/usage/push';
 import { deepRagSearch, defaultSearchDatasetData } from '@fastgpt/service/core/dataset/search';
 import { updateApiKeyUsage } from '@fastgpt/service/support/openapi/tools';
@@ -61,6 +62,13 @@ export async function handler(
   // auth balance
   await checkTeamAIPoints(teamId);
 
+  // Collection 级权限过滤：Dataset read 鉴权通过后，批量解析可读文件 Collection
+  const allowedCollectionIdList = await resolveReadableCollectionIds({
+    teamId,
+    datasetIds: [datasetId],
+    tmbId
+  });
+
   // Search-test images must be temp objects created by this team. Client-supplied keys are not
   // proof of ownership, so reject dataset/chat/foreign-team keys before any S3 read happens.
   const validQueryImageKeys = queryImageUrls.filter((key) =>
@@ -99,7 +107,8 @@ export async function handler(
     embeddingWeight,
     usingReRank,
     rerankModel: rerankModelData,
-    rerankWeight
+    rerankWeight,
+    allowedCollectionIdList
   };
   const {
     searchRes,

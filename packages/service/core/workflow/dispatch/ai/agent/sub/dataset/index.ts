@@ -27,6 +27,7 @@ import {
   createQueryExtensionChildNodeResponse
 } from '../../../../dataset/nodeResponse';
 import { filterDatasetsByTmbId } from '../../../../../../dataset/utils';
+import { resolveReadableCollectionIds } from '../../../../../../../support/permission/collection/readableCollection';
 import { normalizeDatasetSearchInput } from '../../../../dataset/utils';
 const logger = getLogger(LogCategories.MODULE.AI.AGENT);
 
@@ -213,6 +214,16 @@ export const dispatchAgentDatasetSearch = async ({
       };
     }
 
+    // Collection 级权限过滤：仅当开启 authTmbId（按运行用户校验知识库权限）时，
+    // 在 Dataset read 鉴权通过后批量解析可读文件 Collection；authTmbId=false 保持原行为。
+    const allowedCollectionIdList = datasetParams.authTmbId
+      ? await resolveReadableCollectionIds({
+          teamId,
+          datasetIds,
+          tmbId
+        })
+      : undefined;
+
     // Get vector model
     const dataset = await MongoDataset.findById(datasetIds[0], 'vectorModel vlmModel').lean();
     const vectorModel = getEmbeddingModel(dataset?.vectorModel);
@@ -237,6 +248,7 @@ export const dispatchAgentDatasetSearch = async ({
       datasetSearchUsingExtensionQuery: datasetParams.datasetSearchUsingExtensionQuery ?? false,
       datasetSearchExtensionModel: datasetParams.datasetSearchExtensionModel,
       datasetSearchExtensionBg: datasetParams.datasetSearchExtensionBg,
+      allowedCollectionIdList,
       userKey
     };
     const {

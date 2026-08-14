@@ -1,6 +1,9 @@
 import type { ClientSession, AnyBulkWriteOperation } from '../../common/mongo';
-import type { PerResourceTypeEnum } from '@fastgpt/global/support/permission/constant';
-import { ManageRoleVal, OwnerRoleVal } from '@fastgpt/global/support/permission/constant';
+import {
+  ManageRoleVal,
+  OwnerRoleVal,
+  PerResourceTypeEnum
+} from '@fastgpt/global/support/permission/constant';
 import { MongoResourcePermission } from './schema';
 import type { ResourcePermissionType } from '@fastgpt/global/support/permission/type';
 import { type PermissionValueType } from '@fastgpt/global/support/permission/type';
@@ -8,9 +11,15 @@ import { getGroupsByTmbId } from './memberGroup/controllers';
 import { Permission } from '@fastgpt/global/support/permission/controller';
 import { type ParentIdType } from '@fastgpt/global/common/parentFolder/type';
 import { getOrgIdSetWithParentByTmbId } from './org/controllers';
-import { getCollaboratorId, sumPer } from '@fastgpt/global/support/permission/utils';
+import {
+  getCollaboratorId,
+  mergeCollaboratorList,
+  sumPer
+} from '@fastgpt/global/support/permission/utils';
 import { type SyncChildrenPermissionResourceType } from './inheritPermission';
 import { pickCollaboratorIdFields } from './utils';
+import { MongoDataset } from '../../core/dataset/schema';
+import { DatasetTypeEnum } from '@fastgpt/global/core/dataset/constants';
 import type {
   CollaboratorItemDetailType,
   CollaboratorItemType
@@ -133,6 +142,58 @@ export async function getResourceOwnedClbs({
     undefined,
     { ...(session ? { session } : {}) }
   ).lean();
+}
+
+/**
+ * Dataset 的**实际（有效）clbs**（参照 `authDatasetByTmbId` 的父级取值逻辑）：
+ * - 自身 clbs 总是包含；
+ * - 若 dataset 为继承态（`inheritPermission !== false`）、非 folder、且有 `parentId`，
+ *   则合并其**直接父级 Dataset Folder** 的 clbs（folder 存全量快照，父级已含全部祖先权限，
+ *   无需沿链递归），父级 owner 由 `mergeCollaboratorList` 映射为 manage（owner 不透传）。
+ * - 否则仅返回自身 clbs。
+ *
+ * 普通 dataset 的 `getResourceOwnedClbs` 只返回自身直接 clbs；当需要把 dataset 作为某资源的
+ * 父级来源（如创建根 Collection Folder 快照）时必须使用本函数。
+ */
+export async function getDatasetEffectiveClbs({
+  teamId,
+  datasetId,
+  session
+}: {
+  teamId: string;
+  datasetId: string;
+  session?: ClientSession;
+}): Promise<CollaboratorItemType[]> {
+  const dataset = (await MongoDataset.findById(datasetId, 'parentId inheritPermission type')
+    .lean()
+    .session(session ?? null)) as {
+    parentId?: string | null;
+    inheritPermission?: boolean;
+    type?: string;
+  } | null;
+
+  const ownClbs = await getResourceOwnedClbs({
+    resourceType: PerResourceTypeEnum.dataset,
+    teamId,
+    resourceId: datasetId,
+    session
+  });
+
+  const isGetParentClb =
+    dataset?.inheritPermission !== false &&
+    dataset?.type !== DatasetTypeEnum.folder &&
+    !!dataset?.parentId;
+  if (!isGetParentClb) {
+    return ownClbs;
+  }
+
+  const parentClbs = await getResourceOwnedClbs({
+    resourceType: PerResourceTypeEnum.dataset,
+    teamId,
+    resourceId: String(dataset.parentId),
+    session
+  });
+  return mergeCollaboratorList({ parentClbs, childClbs: ownClbs });
 }
 
 export const getClbsInfo = async ({

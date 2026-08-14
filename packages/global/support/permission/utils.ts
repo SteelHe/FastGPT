@@ -206,3 +206,43 @@ export const isPrivateResourceByCollaborators = <T extends CollaboratorItemType>
 
   return realClbs.length <= 1;
 };
+
+/**
+ * Normalize a full collaborator list before it is persisted
+ * 1. Merge collaborators with the same `CollaboratorIdType` using bitwise OR (`|`);
+ * 2. Keep owner (`permission === OwnerRoleVal`) unchanged;
+ * 3. For non-owner permissions, keep only the lowest set bit of the low 3 bits
+ *    (e.g. 0b011 -> 0b001, 0b110 -> 0b010, 0b111 -> 0b001), and keep higher
+ *    bits unchanged.
+ *
+ * Owner records are derived from the resource `tmbId`; the caller must ensure
+ * the owner is present, unchanged, and that no other collaborator is granted
+ * `OwnerRoleVal` (otherwise the request is rejected).
+ */
+export const sanitizeCollaboratorPermissions = (
+  collaborators: CollaboratorItemType[]
+): CollaboratorItemType[] => {
+  const idMap = new Map<string, CollaboratorItemType>();
+  for (const clb of collaborators) {
+    const id = getCollaboratorId(clb);
+    const existing = idMap.get(id);
+    if (!existing) {
+      idMap.set(id, clb);
+      continue;
+    }
+    // Owner 保持 OwnerRoleVal 不变（`|` 会把 4294967295 折为 int32 -1，必须显式保留 owner）
+    const permission =
+      existing.permission === OwnerRoleVal || clb.permission === OwnerRoleVal
+        ? OwnerRoleVal
+        : existing.permission | clb.permission;
+    idMap.set(id, { ...clb, permission });
+  }
+
+  const mergedList = Array.from(idMap.values());
+
+  return mergedList.map((clb) => {
+    if (clb.permission === OwnerRoleVal) return clb;
+    const low3 = clb.permission & 0b111;
+    return { ...clb, permission: ((clb.permission & ~0b111) | (low3 & -low3)) >>> 0 };
+  });
+};

@@ -19,6 +19,7 @@ import {
   syncChildrenPermission,
   syncCollaborators
 } from '@fastgpt/service/support/permission/inheritPermission';
+import { syncDatasetCollectionFolders } from '@fastgpt/service/support/permission/collection/folderSync';
 import { authUserPer } from '@fastgpt/service/support/permission/user/auth';
 import { TeamDatasetCreatePermissionVal } from '@fastgpt/global/support/permission/user/constant';
 import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
@@ -66,6 +67,7 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
       externalReadUrl,
       apiDatasetServer,
       autoSync,
+      inheritPermission,
       chunkSettings: rawChunkSettings
     }
   } = parseApiInput({
@@ -227,7 +229,7 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
         ...(chunkSettings && { chunkSettings }),
         ...(intro !== undefined && { intro }),
         ...(externalReadUrl !== undefined && { externalReadUrl }),
-        ...(isMove && { inheritPermission: true }),
+        ...(isMove && inheritPermission !== false && { inheritPermission: true }),
         ...(typeof autoSync === 'boolean' && { autoSync }),
         ...apiDatasetParams
       },
@@ -244,29 +246,48 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
 
   await mongoSessionRun(async (session) => {
     if (isMove) {
-      const parentClbs = await getResourceOwnedClbs({
-        teamId: dataset.teamId,
-        resourceId: parentId,
-        resourceType: PerResourceTypeEnum.dataset,
-        session
-      });
+      if (inheritPermission !== false) {
+        // inheritPermission=true（默认）：合并目标父 folder 权限并向下同步，
+        // 然后沿新的 Dataset 权限链同步其下继承态 Collection Folder 快照。
+        const parentClbs = await getResourceOwnedClbs({
+          teamId: dataset.teamId,
+          resourceId: parentId,
+          resourceType: PerResourceTypeEnum.dataset,
+          session
+        });
 
-      await syncCollaborators({
-        teamId: dataset.teamId,
-        resourceId: id,
-        resourceType: PerResourceTypeEnum.dataset,
-        collaborators: parentClbs,
-        session
-      });
+        await syncCollaborators({
+          teamId: dataset.teamId,
+          resourceId: id,
+          resourceType: PerResourceTypeEnum.dataset,
+          collaborators: parentClbs,
+          session
+        });
 
-      await syncChildrenPermission({
-        resource: dataset,
-        resourceType: PerResourceTypeEnum.dataset,
-        resourceModel: MongoDataset,
-        folderTypeList: [DatasetTypeEnum.folder],
-        collaborators: parentClbs,
-        session
-      });
+        await syncChildrenPermission({
+          resource: dataset,
+          resourceType: PerResourceTypeEnum.dataset,
+          resourceModel: MongoDataset,
+          folderTypeList: [DatasetTypeEnum.folder],
+          collaborators: parentClbs,
+          session
+        });
+
+        // Collection Folder 快照种子 = 被移动 Dataset 当前有效协作者（目标父级合并后）。
+        const rootClbs = await getResourceOwnedClbs({
+          teamId: dataset.teamId,
+          resourceId: id,
+          resourceType: PerResourceTypeEnum.dataset,
+          session
+        });
+        await syncDatasetCollectionFolders({
+          teamId: dataset.teamId,
+          datasetId: id,
+          rootClbs,
+          session
+        });
+      }
+      // inheritPermission=false：仅更新 parentId，保留独立权限，不同步目标父级。
       logDatasetMove({ tmbId, teamId, dataset, targetName });
       return onUpdate(session);
     } else {

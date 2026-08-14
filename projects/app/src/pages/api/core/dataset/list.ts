@@ -109,15 +109,15 @@ async function handler(req: ApiRequestProps): Promise<GetDatasetListResponse> {
       : {};
 
     if (searchKey) {
-      const data = {
-        ...datasetPerQuery,
+      // 当前路径限定搜索：搜索必须携带 parentId（当前路径），固定
+      // `{ teamId, parentId, deleteTime: null }` + name/intro 正则，不允许删除 parentId
+      // 做全局搜索再截断。无权限 dataset 由下方 formatDatasets 的 hasReadPer 过滤。
+      return {
         teamId,
+        ...parseParentIdInMongo(parentId ?? null),
         deleteTime: null, // 搜索时也要过滤已删除数据
         ...searchMatch
       };
-      // @ts-ignore
-      delete data.parentId;
-      return data;
     }
 
     return {

@@ -129,6 +129,14 @@ const DatasetSchema = new Schema({
     type: Boolean,
     default: true
   },
+  /** 该 Dataset 下是否配置过 Collection 级权限（独立/自定义）。
+   *  - false（默认）：所有 Collection 均为纯继承，collection 级鉴权可短路为 Dataset 级鉴权；
+   *  - true：至少一个 Collection 配置了独立权限（非继承 / 追加协作者 / 独立 move），需完整 Collection 解析。
+   * 单向置位（只增不减）：stale `true` 仅损失短路优化，不损失正确性。 */
+  hasSetCollectionPermissions: {
+    type: Boolean,
+    default: false
+  },
 
   apiDatasetServer: Object,
 

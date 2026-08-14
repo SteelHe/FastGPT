@@ -126,7 +126,7 @@ export type ParallelTaskResult =
 
 /**
  * Parse a successful runWorkflow response into a ParallelTaskResult.
- * Interactive responses are silently treated as failure (per design §3.5).
+ * Interactive responses are silently treated as failure (per ).
  *
  * Note: runWorkflow always resolves (never rejects), so node-level errors are
  * detected here by checking whether the nestedEnd node was actually reached.

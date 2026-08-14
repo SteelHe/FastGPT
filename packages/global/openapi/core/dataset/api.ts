@@ -277,6 +277,10 @@ export const UpdateDatasetBodySchema = z.object({
   autoSync: z.boolean().optional().meta({
     description: '是否自动同步'
   }),
+  inheritPermission: z.boolean().optional().meta({
+    description:
+      '移动时是否继承目标父目录权限（默认 true；false 时保留自身独立权限，不同步目标父级）'
+  }),
   chunkSettings: ChunkSettingsSchema.optional().meta({
     description: '分块配置'
   })

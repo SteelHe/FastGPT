@@ -33,6 +33,11 @@ import {
 import { DatasetDataIndexTypeEnum } from '@fastgpt/global/core/dataset/data/constants';
 import { getS3DatasetSource } from '../../../common/s3/sources/dataset';
 import { removeS3TTL, isS3ObjectKey } from '../../../common/s3/utils';
+import {
+  createCollectionPermission,
+  getCollectionCreateParentClbs
+} from '../../../support/permission/collection/create';
+import { deleteCollectionPermissions } from '../../../support/permission/collection/cleanup';
 import type {
   CreateCollectionWithResultResponseType,
   ApiCreateDatasetCollectionParams
@@ -274,54 +279,83 @@ export type CreateOneCollectionParams = ApiCreateDatasetCollectionParams & {
   session?: ClientSession;
 };
 export async function createOneCollection({ session, ...props }: CreateOneCollectionParams) {
-  const {
-    teamId,
-    parentId,
-    datasetId,
-    tags,
+  const fn = async (s: ClientSession) => {
+    const {
+      teamId,
+      parentId,
+      datasetId,
+      tags,
 
-    fileId,
-    rawLink,
-    externalFileId,
-    externalFileUrl,
-    apiFileId,
-    apiFileParentId
-  } = props;
+      fileId,
+      rawLink,
+      externalFileId,
+      externalFileUrl,
+      apiFileId,
+      apiFileParentId
+    } = props;
 
-  const collectionTags = await createOrGetCollectionTags({
-    tags,
-    teamId,
-    datasetId,
-    session
-  });
+    const collectionTags = await createOrGetCollectionTags({
+      tags,
+      teamId,
+      datasetId,
+      session: s
+    });
 
-  // Create collection
-  const [collection] = await MongoDatasetCollection.create(
-    [
-      {
-        ...props,
-        _id: undefined,
+    // Create collection
+    const [collection] = await MongoDatasetCollection.create(
+      [
+        {
+          ...props,
+          _id: undefined,
 
-        parentId: parentId || null,
+          parentId: parentId || null,
 
-        tags: collectionTags,
+          tags: collectionTags,
 
-        ...(fileId ? { fileId } : {}),
-        ...(rawLink ? { rawLink } : {}),
-        ...(externalFileId ? { externalFileId } : {}),
-        ...(externalFileUrl ? { externalFileUrl } : {}),
-        ...(apiFileId ? { apiFileId } : {}),
-        ...(apiFileParentId ? { apiFileParentId } : {})
-      }
-    ],
-    { session, ordered: true }
-  );
+          ...(fileId ? { fileId } : {}),
+          ...(rawLink ? { rawLink } : {}),
+          ...(externalFileId ? { externalFileId } : {}),
+          ...(externalFileUrl ? { externalFileUrl } : {}),
+          ...(apiFileId ? { apiFileId } : {}),
+          ...(apiFileParentId ? { apiFileParentId } : {})
+        }
+      ],
+      { session: s, ordered: true }
+    );
 
-  if (isS3ObjectKey(fileId, 'dataset')) {
-    await removeS3TTL({ key: fileId, bucketName: 'private', session });
+    if (isS3ObjectKey(fileId, 'dataset')) {
+      await removeS3TTL({ key: fileId, bucketName: 'private', session: s });
+    }
+
+    // 创建 Collection 权限初始化：
+    // folder 快照 = 父级（Dataset 或父 Collection Folder）real clbs（owner→manage）+ 自身 owner；
+    // 非 folder / 独立态仅写入自身 owner 记录。与 Collection 文档创建在同一事务。
+    await createCollectionPermission({
+      resource: {
+        _id: String(collection._id),
+        teamId: collection.teamId,
+        type: collection.type,
+        parentId: collection.parentId ? String(collection.parentId) : null,
+        datasetId: collection.datasetId,
+        tmbId: String(collection.tmbId)
+      },
+      parentClbs: await getCollectionCreateParentClbs({
+        teamId: collection.teamId,
+        datasetId: collection.datasetId,
+        parentId: collection.parentId ? String(collection.parentId) : null,
+        session: s
+      }),
+      inheritPermission: props.inheritPermission !== false,
+      session: s
+    });
+
+    return collection;
+  };
+
+  if (session) {
+    return fn(session);
   }
-
-  return collection;
+  return mongoSessionRun(fn);
 }
 
 /* delete collection related images/files */
@@ -449,6 +483,10 @@ export async function delCollection({
       },
       { session }
     ).lean();
+
+    // 同一事务内清理该 Collection（含子树）的 resource_permissions：
+    // 资源删除成功但权限清理失败时事务整体回滚，不遗留孤儿权限记录；幂等。
+    await deleteCollectionPermissions({ teamId, collectionIds, session });
 
     // delete s3 images which are uploaded by users
     await s3DatasetSource.deleteDatasetFilesByKeys(imageIds);

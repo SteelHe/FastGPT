@@ -11,6 +11,7 @@ import {
   GetCollectionTrainingDetailResponseSchema,
   ListCollectionV2BodySchema,
   ReadCollectionSourceBodyRawSchema,
+  ResumeCollectionInheritPermissionBodySchema,
   ScrollCollectionsBodySchema,
   SyncCollectionBodySchema,
   UpdateDatasetCollectionBodySchema
@@ -110,6 +111,26 @@ export const DatasetCollectionPath: OpenAPIPath = {
       responses: {
         200: {
           description: '成功更新集合信息'
+        }
+      }
+    }
+  },
+  '/core/dataset/collection/resumeInheritPermission': {
+    post: {
+      summary: '恢复集合继承权限',
+      description:
+        '恢复集合对父级（Collection Folder 或根 Dataset）权限的继承，非继承态子集合不被覆盖',
+      tags: [DevApiTagsMap.datasetCollection, SystemOpenApiTagMap.datasetCollection],
+      requestBody: {
+        content: {
+          'application/json': {
+            schema: ResumeCollectionInheritPermissionBodySchema
+          }
+        }
+      },
+      responses: {
+        200: {
+          description: '成功恢复继承权限'
         }
       }
     }

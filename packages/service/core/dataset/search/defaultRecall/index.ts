@@ -50,7 +50,8 @@ export async function searchDatasetData(
     rerankModel,
     rerankWeight = 0.5,
     datasetIds = [],
-    collectionFilterMatch
+    collectionFilterMatch,
+    allowedCollectionIdList
   } = props;
 
   const searchMode = DatasetSearchModeMap[inputSearchMode]
@@ -102,7 +103,8 @@ export async function searchDatasetData(
     embeddingLimit,
     fullTextLimit,
     textQueries,
-    imageCaptionQueries: imageCaptionQueries.queries
+    imageCaptionQueries: imageCaptionQueries.queries,
+    allowedCollectionIdList
   });
 
   // Step 3: 先在同一语义来源内融合。

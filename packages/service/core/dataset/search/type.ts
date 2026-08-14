@@ -43,6 +43,11 @@ export type SearchDatasetDataProps = {
     }
   */
   collectionFilterMatch?: string;
+  /**
+   * 授权文件 Collection ID 列表（检索入口在 Dataset read 鉴权后批量解析）。
+   * 未传表示未启用 Collection 级权限过滤，沿用原行为。
+   */
+  allowedCollectionIdList?: string[];
 };
 
 export type SearchDatasetDataResponse = {

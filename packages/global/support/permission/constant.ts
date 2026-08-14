@@ -49,6 +49,7 @@ export enum PerResourceTypeEnum {
   team = 'team',
   app = 'app',
   dataset = 'dataset',
+  collection = 'collection',
   model = 'model',
   agentSkill = 'agentSkill'
 }

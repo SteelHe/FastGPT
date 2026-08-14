@@ -29,7 +29,7 @@ export const fullTextRecall = async ({
   datasetIds,
   queryGroups,
   limit,
-  filterCollectionIdList,
+  effectiveCollectionIdList,
   forbidCollectionIdList
 }: {
   teamId: string;
@@ -39,7 +39,8 @@ export const fullTextRecall = async ({
     queries: string[];
   }[];
   limit: number;
-  filterCollectionIdList?: string[];
+  /** 授权集合 ∩ 元数据条件 - forbid 后实际生效的 collectionId 过滤 */
+  effectiveCollectionIdList?: string[];
   forbidCollectionIdList: string[];
 }): Promise<{
   textFullTextRecallResults: SearchDataResponseItemType[];
@@ -68,10 +69,10 @@ export const fullTextRecall = async ({
               teamId: new Types.ObjectId(teamId),
               $text: { $search: await jiebaSplit({ text: query }) },
               datasetId: { $in: datasetIds.map((id) => new Types.ObjectId(id)) },
-              ...(filterCollectionIdList
+              ...(effectiveCollectionIdList
                 ? {
                     collectionId: {
-                      $in: filterCollectionIdList
+                      $in: effectiveCollectionIdList
                         .filter((id) => !forbidCollectionIdList.includes(id))
                         .map((id) => new Types.ObjectId(id))
                     }
@@ -117,10 +118,21 @@ export const fullTextRecall = async ({
   );
 
   // full-text 表只保存 dataId/collectionId/score，展示字段仍回查主 data 与 collection。
+  // 授权集合防线：Mongo 回查时再次按 effectiveCollectionIdList 过滤，
+  // 防止索引延迟/旧向量/缓存导致越权结果。
+  const effectiveSet = effectiveCollectionIdList ? new Set(effectiveCollectionIdList) : undefined;
+  // dataset_collections 无 collectionId 字段（主键为 _id）。授权集合防线必须用
+  // _id IN effectiveCollectionIdList，否则真子集权限过滤时该回查
+  // 永远匹配为空，导致全文召回被清空。与 embeddingRecall 的 safeCollectionIdList
+  // 同思路：候选集合先与授权集合求交集，再用单一 _id 条件回查，避免字段名冲突。
+  const safeCollectionIdList = effectiveSet
+    ? collectionIds.filter((id) => effectiveSet.has(String(id)))
+    : collectionIds;
   const [dataMaps, collectionMaps] = await Promise.all([
     MongoDatasetData.find(
       {
-        _id: { $in: dataIds }
+        _id: { $in: dataIds },
+        ...(effectiveSet ? { collectionId: { $in: effectiveCollectionIdList } } : {})
       },
       datasetDataSelectField,
       { ...readFromSecondary }
@@ -137,7 +149,7 @@ export const fullTextRecall = async ({
       }),
     MongoDatasetCollection.find(
       {
-        _id: { $in: collectionIds }
+        _id: { $in: safeCollectionIdList }
       },
       datasetCollectionSelectField,
       { ...readFromSecondary }
