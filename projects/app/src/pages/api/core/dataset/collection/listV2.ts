@@ -28,7 +28,10 @@ import {
   type ListCollectionV2ResponseType
 } from '@fastgpt/global/openapi/core/dataset/collection/api';
 import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/collection/list/flatten';
-import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import {
+  canShortCircuitCollectionPermission,
+  getReadableCollectionIds
+} from '@fastgpt/service/support/permission/collection/readableCollection';
 import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/type';
 import { getGroupsByTmbId } from '@fastgpt/service/support/permission/memberGroup/controllers';
 import { getOrgIdSetWithParentByTmbId } from '@fastgpt/service/support/permission/org/controllers';
@@ -39,6 +42,23 @@ const defaultCollectionTrainingStatus = {
   finalErrorAmount: 0,
   hasError: false,
   slowestTrainingStatus: CollectionTrainingStatusEnum.ready
+};
+
+/** 列表回查的完整字段（两阶段路径与短路路径共用）。 */
+const selectField = {
+  _id: 1,
+  parentId: 1,
+  tmbId: 1,
+  name: 1,
+  type: 1,
+  forbid: 1,
+  createTime: 1,
+  updateTime: 1,
+  trainingType: 1,
+  fileId: 1,
+  rawLink: 1,
+  tags: 1,
+  externalFileId: 1
 };
 
 type TrainingAmountAggregateItem = {
@@ -76,49 +96,25 @@ const formatTrainingStatus = (item?: TrainingAmountAggregateItem) => {
 };
 
 /**
- * 解析当前用户对当前 Dataset 下 Collection 的可读集合（短路规则）：
- * - 团队管理员/所有者：已通过 Dataset read 前置鉴权，直接视为全部可读；
- * - Dataset 无 Collection 自定义权限（hasSetCollectionPermissions=false）：
- *   全部 Collection 纯继承，直接复用 Dataset 有效权限生成可读 ID，O(1) 短路；
- * - 全部 Collection 均为继承态：复用 Dataset 有效权限（read 已通过），直接生成可读 ID；
- * - 存在非继承态：对非继承态单独解析，继承态复用父级结果（getReadableCollectionIds 内部处理）。
+ * 解析当前用户对当前 Dataset 下 Collection 的可读集合。
+ *
+ * 调用方已通过 `canShortCircuitCollectionPermission` 判定（非团队 owner/admin、Dataset 已
+ * 配置过 Collection 权限），此处仅剩真子集场景：批量加载 group/org 后逐条判定可读性
+ * （`$in` 批量加载权限，无 N+1）。owner / 纯继承 / 全继承短路已由调用方前置处理，不再重复。
  */
 const resolveReadableCollectionIds = async ({
   collections,
   tmbId,
   teamId,
-  isOwner,
-  datasetRole,
-  hasSetCollectionPermissions
+  datasetRole
 }: {
   collections: CollectionPermissionItemType[];
   tmbId: string;
   teamId: string;
-  isOwner: boolean;
   datasetRole: number;
-  hasSetCollectionPermissions?: boolean;
 }): Promise<string[]> => {
   if (collections.length === 0) return [];
 
-  if (isOwner) {
-    // 团队管理员 / 团队所有者短路：直接全部可读，仍按当前目录/平铺/分页返回
-    return collections.map((item) => String(item._id));
-  }
-
-  if (hasSetCollectionPermissions === false) {
-    // 短路：无任何 Collection 自定义权限 → 每个 Collection 有效权限 = Dataset 有效权限，
-    // Dataset read 前置鉴权已通过，全部 Collection 可读（含 folder 快照与 Dataset 链镜像一致）。
-    return collections.map((item) => String(item._id));
-  }
-
-  const allInherited = collections.every((item) => item.inheritPermission !== false);
-  if (allInherited) {
-    // 全继承态短路：Dataset read 前置鉴权已通过，普通 Collection 直接复用 Dataset 有效权限，
-    // Collection Folder 使用已同步权限快照，逐条解析降为一次。
-    return collections.map((item) => String(item._id));
-  }
-
-  // 存在非继承态：批量解析（$in 批量加载权限，无 N+1）
   const [groupIds, orgIds] = await Promise.all([
     getGroupsByTmbId({ tmbId, teamId }).then((list) => list.map((item) => String(item._id))),
     getOrgIdSetWithParentByTmbId({ teamId, tmbId })
@@ -151,13 +147,198 @@ async function handler(req: ApiRequestProps): Promise<ListCollectionV2ResponseTy
   const searchText = rawSearchText?.replace(/'/g, '');
 
   // auth dataset and get my role（Dataset read 前置门槛）
-  const { teamId, tmbId, permission, dataset } = await authDataset({
+  const { teamId, tmbId, permission } = await authDataset({
     req,
     authToken: true,
     authApiKey: true,
     datasetId,
     per: ReadPermissionVal
   });
+
+  // 短路判定：团队 owner/admin 或纯继承（hasSetCollectionPermissions=false）→
+  // 无需逐 collection 权限解析，直接按原流程在当前目录 DB 过滤（性能优）。
+  const canShortCircuit = await canShortCircuitCollectionPermission({
+    teamId,
+    datasetIds: [datasetId],
+    tmbId
+  });
+
+  // 响应构建（短路 DB 路径与两阶段路径共用）
+  const buildListResponse = async (pageCollections: any[], total: number) => {
+    if (simple) {
+      return ListCollectionV2ResponseSchema.parse({
+        list: await Promise.all(
+          pageCollections.map(async (item) => ({
+            ...item,
+            tags: await collectionTagsToTagLabel({
+              datasetId,
+              tags: item.tags
+            }),
+            dataAmount: 0,
+            ...defaultCollectionTrainingStatus,
+            permission
+          }))
+        ),
+        total
+      });
+    }
+
+    const collectionIds = pageCollections.map((item) => new Types.ObjectId(item._id));
+
+    // Compute data amount（仅当前页 ≤ pageSize 条）
+    const [trainingAmount, dataAmount]: [
+      TrainingAmountAggregateItem[],
+      { _id: string; count: number }[]
+    ] = await Promise.all([
+      MongoDatasetTraining.aggregate(
+        [
+          {
+            $match: {
+              teamId: new Types.ObjectId(teamId),
+              datasetId: new Types.ObjectId(datasetId),
+              collectionId: { $in: collectionIds },
+              ...remainingTrainingMatch
+            }
+          },
+          {
+            $addFields: {
+              modeRank: {
+                $switch: {
+                  branches: trainingModeRanks.map(({ mode, rank }) => ({
+                    case: { $eq: ['$mode', mode] },
+                    then: rank
+                  })),
+                  default: 999
+                }
+              },
+              isActiveTraining: activeTrainingExpr,
+              isFinalErrorTraining: finalErrorTrainingExpr
+            }
+          },
+          {
+            $group: {
+              _id: '$collectionId',
+              trainingAmount: { $sum: 1 },
+              activeTrainingAmount: { $sum: { $cond: ['$isActiveTraining', 1, 0] } },
+              finalErrorAmount: { $sum: { $cond: ['$isFinalErrorTraining', 1, 0] } },
+              modeCounts: {
+                $push: {
+                  mode: '$mode',
+                  modeRank: '$modeRank',
+                  activeCount: { $cond: ['$isActiveTraining', 1, 0] },
+                  finalErrorCount: { $cond: ['$isFinalErrorTraining', 1, 0] }
+                }
+              }
+            }
+          },
+          { $unwind: '$modeCounts' },
+          {
+            $group: {
+              _id: {
+                collectionId: '$_id',
+                mode: '$modeCounts.mode',
+                modeRank: '$modeCounts.modeRank'
+              },
+              trainingAmount: { $first: '$trainingAmount' },
+              activeTrainingAmount: { $first: '$activeTrainingAmount' },
+              finalErrorAmount: { $first: '$finalErrorAmount' },
+              activeCount: { $sum: '$modeCounts.activeCount' },
+              finalErrorCount: { $sum: '$modeCounts.finalErrorCount' }
+            }
+          },
+          {
+            $sort: {
+              '_id.collectionId': 1,
+              '_id.modeRank': 1
+            }
+          },
+          {
+            $group: {
+              _id: '$_id.collectionId',
+              trainingAmount: { $first: '$trainingAmount' },
+              activeTrainingAmount: { $first: '$activeTrainingAmount' },
+              finalErrorAmount: { $first: '$finalErrorAmount' },
+              modeCounts: {
+                $push: {
+                  mode: '$_id.mode',
+                  activeCount: '$activeCount',
+                  finalErrorCount: '$finalErrorCount'
+                }
+              }
+            }
+          }
+        ],
+        {
+          ...readFromSecondary
+        }
+      ),
+      MongoDatasetData.aggregate(
+        [
+          {
+            $match: {
+              teamId: new Types.ObjectId(teamId),
+              datasetId: new Types.ObjectId(datasetId),
+              collectionId: { $in: collectionIds }
+            }
+          },
+          {
+            $group: {
+              _id: '$collectionId',
+              count: { $sum: 1 }
+            }
+          }
+        ],
+        {
+          ...readFromSecondary
+        }
+      )
+    ]);
+
+    const list = await Promise.all(
+      pageCollections.map(async (item) => ({
+        ...item,
+        tags: await collectionTagsToTagLabel({
+          datasetId,
+          tags: item.tags
+        }),
+        dataAmount:
+          dataAmount.find((amount) => String(amount._id) === String(item._id))?.count || 0,
+        ...formatTrainingStatus(
+          trainingAmount.find((amount) => String(amount._id) === String(item._id))
+        ),
+        permission
+      }))
+    );
+
+    return ListCollectionV2ResponseSchema.parse({ list, total });
+  };
+
+  // 短路路径：按当前目录（parentId）+ 搜索/标签/类型在 DB 直接过滤（原流程，性能优）。
+  if (canShortCircuit) {
+    const match: Record<string, unknown> = {
+      teamId: new Types.ObjectId(teamId),
+      datasetId: new Types.ObjectId(datasetId),
+      parentId: parentId ? new Types.ObjectId(parentId) : null
+    };
+    if (selectFolder) match.type = DatasetCollectionTypeEnum.folder;
+    if (filterTags.length) match.tags = { $in: filterTags };
+    if (searchText) match.name = { $regex: replaceRegChars(searchText), $options: 'i' };
+
+    const total = await MongoDatasetCollection.countDocuments(match, { ...readFromSecondary });
+    if (total === 0) {
+      return ListCollectionV2ResponseSchema.parse({ list: [], total: 0 });
+    }
+    const pageCollections = await MongoDatasetCollection.find(match, undefined, {
+      ...readFromSecondary
+    })
+      .select(selectField)
+      .sort({ updateTime: -1 })
+      .skip(offset)
+      .limit(pageSize)
+      .lean();
+
+    return buildListResponse(pageCollections, total);
+  }
 
   // 阶段一：以 datasetId 为边界读取该 Dataset 下全部 Collection 的最小权限/层级字段
   // （根目录不得仅 parentId=null，否则发现不了隐藏 Folder 下可读文件；
@@ -175,9 +356,7 @@ async function handler(req: ApiRequestProps): Promise<ListCollectionV2ResponseTy
       parentId: 1,
       tmbId: 1,
       type: 1,
-      inheritPermission: 1,
-      name: 1, // 用于内存 searchText 过滤（当前路径搜索）
-      tags: 1 // 用于内存 filterTags 过滤
+      inheritPermission: 1
     })
     .lean();
 
@@ -189,14 +368,12 @@ async function handler(req: ApiRequestProps): Promise<ListCollectionV2ResponseTy
     type: item.type
   }));
 
-  // 批量解析可读 ID 集合 R（短路：团队 owner / 无 Collection 自定义权限 / 全继承态 / 非继承态批量解析）
+  // 批量解析可读 ID 集合 R（owner / 纯继承短路已由 canShortCircuitCollectionPermission 前置处理）
   const readableIds = await resolveReadableCollectionIds({
     collections: permissionItems,
     tmbId,
     teamId,
-    isOwner: permission.isOwner,
-    datasetRole: permission.role,
-    hasSetCollectionPermissions: dataset.hasSetCollectionPermissions
+    datasetRole: permission.role
   });
 
   // 内存构建平铺层级，得到当前目录展示节点 visibleIds
@@ -205,204 +382,37 @@ async function handler(req: ApiRequestProps): Promise<ListCollectionV2ResponseTy
     readableIds,
     parentId ?? null
   );
-  let visibleIds = visibleIdsByParentId.get(parentId ?? '') ?? [];
-
-  // 当前路径限定搜索 + 展示过滤（searchText 只匹配当前 parentId 下的 collection，
-  // 不删除 parentId 作用域做全局搜索；不可读节点已在可读集合阶段剔除）
-  if (searchText || selectFolder || filterTags.length) {
-    const idToItem = new Map(collections.map((item) => [String(item._id), item]));
-    const nameRegex = searchText ? new RegExp(replaceRegChars(searchText), 'i') : null;
-    visibleIds = visibleIds.filter((id) => {
-      const item = idToItem.get(id);
-      if (!item) return false;
-      if (selectFolder && item.type !== DatasetCollectionTypeEnum.folder) return false;
-      if (filterTags.length && !item.tags?.some((tag) => filterTags.includes(tag))) return false;
-      if (nameRegex && !nameRegex.test(item.name)) return false;
-      return true;
-    });
-  }
-  // total = 过滤后当前目录展示节点数（visibleIds.length），不是 countDocuments(match) 原始数
-  const total = visibleIds.length;
+  const visibleIds = visibleIdsByParentId.get(parentId ?? '') ?? [];
 
   if (visibleIds.length === 0) {
     return ListCollectionV2ResponseSchema.parse({ list: [], total: 0 });
   }
 
-  const selectField = {
-    _id: 1,
-    parentId: 1,
-    tmbId: 1,
-    name: 1,
-    type: 1,
-    forbid: 1,
-    createTime: 1,
-    updateTime: 1,
-    trainingType: 1,
-    fileId: 1,
-    rawLink: 1,
-    tags: 1,
-    externalFileId: 1
+  // 阶段二：对当前目录可见 ID 在 DB 直接做搜索/标签/类型过滤 + 排序 + skip/limit 分页。
+  // searchText 仍限定当前 parentId 作用域（不可读节点已在可读集合阶段剔除）。
+  // 注意：不能额外加 parentId 条件——flatten 会把不可读中间 Folder 下的可读文件提升到
+  // 最近可读祖先展示，其真实 parentId 可能指向不可见 Folder，加条件会漏掉这些节点。
+  const match: Record<string, unknown> = {
+    _id: { $in: visibleIds.map((id) => new Types.ObjectId(id)) }
   };
+  if (selectFolder) match.type = DatasetCollectionTypeEnum.folder;
+  if (filterTags.length) match.tags = { $in: filterTags };
+  if (searchText) match.name = { $regex: replaceRegChars(searchText), $options: 'i' };
 
-  // 阶段二：仅对当前目录可见 ID 回查完整字段，由 MongoDB 排序 + skip/limit 分页
-  const pageCollections = await MongoDatasetCollection.find(
-    { _id: { $in: visibleIds.map((id) => new Types.ObjectId(id)) } },
-    undefined,
-    { ...readFromSecondary }
-  )
+  const total = await MongoDatasetCollection.countDocuments(match, { ...readFromSecondary });
+  if (total === 0) {
+    return ListCollectionV2ResponseSchema.parse({ list: [], total: 0 });
+  }
+
+  const pageCollections = await MongoDatasetCollection.find(match, undefined, {
+    ...readFromSecondary
+  })
     .select(selectField)
     .sort({ updateTime: -1 })
     .skip(offset)
     .limit(pageSize)
     .lean();
 
-  // not count data amount
-  if (simple) {
-    return ListCollectionV2ResponseSchema.parse({
-      list: await Promise.all(
-        pageCollections.map(async (item) => ({
-          ...item,
-          tags: await collectionTagsToTagLabel({
-            datasetId,
-            tags: item.tags
-          }),
-          dataAmount: 0,
-          ...defaultCollectionTrainingStatus,
-          permission
-        }))
-      ),
-      total
-    });
-  }
-
-  const collectionIds = pageCollections.map((item) => new Types.ObjectId(item._id));
-
-  // Compute data amount（仅当前页 ≤ pageSize 条）
-  const [trainingAmount, dataAmount]: [
-    TrainingAmountAggregateItem[],
-    { _id: string; count: number }[]
-  ] = await Promise.all([
-    MongoDatasetTraining.aggregate(
-      [
-        {
-          $match: {
-            teamId: new Types.ObjectId(teamId),
-            datasetId: new Types.ObjectId(datasetId),
-            collectionId: { $in: collectionIds },
-            ...remainingTrainingMatch
-          }
-        },
-        {
-          $addFields: {
-            modeRank: {
-              $switch: {
-                branches: trainingModeRanks.map(({ mode, rank }) => ({
-                  case: { $eq: ['$mode', mode] },
-                  then: rank
-                })),
-                default: 999
-              }
-            },
-            isActiveTraining: activeTrainingExpr,
-            isFinalErrorTraining: finalErrorTrainingExpr
-          }
-        },
-        {
-          $group: {
-            _id: '$collectionId',
-            trainingAmount: { $sum: 1 },
-            activeTrainingAmount: { $sum: { $cond: ['$isActiveTraining', 1, 0] } },
-            finalErrorAmount: { $sum: { $cond: ['$isFinalErrorTraining', 1, 0] } },
-            modeCounts: {
-              $push: {
-                mode: '$mode',
-                modeRank: '$modeRank',
-                activeCount: { $cond: ['$isActiveTraining', 1, 0] },
-                finalErrorCount: { $cond: ['$isFinalErrorTraining', 1, 0] }
-              }
-            }
-          }
-        },
-        { $unwind: '$modeCounts' },
-        {
-          $group: {
-            _id: {
-              collectionId: '$_id',
-              mode: '$modeCounts.mode',
-              modeRank: '$modeCounts.modeRank'
-            },
-            trainingAmount: { $first: '$trainingAmount' },
-            activeTrainingAmount: { $first: '$activeTrainingAmount' },
-            finalErrorAmount: { $first: '$finalErrorAmount' },
-            activeCount: { $sum: '$modeCounts.activeCount' },
-            finalErrorCount: { $sum: '$modeCounts.finalErrorCount' }
-          }
-        },
-        {
-          $sort: {
-            '_id.collectionId': 1,
-            '_id.modeRank': 1
-          }
-        },
-        {
-          $group: {
-            _id: '$_id.collectionId',
-            trainingAmount: { $first: '$trainingAmount' },
-            activeTrainingAmount: { $first: '$activeTrainingAmount' },
-            finalErrorAmount: { $first: '$finalErrorAmount' },
-            modeCounts: {
-              $push: {
-                mode: '$_id.mode',
-                activeCount: '$activeCount',
-                finalErrorCount: '$finalErrorCount'
-              }
-            }
-          }
-        }
-      ],
-      {
-        ...readFromSecondary
-      }
-    ),
-    MongoDatasetData.aggregate(
-      [
-        {
-          $match: {
-            teamId: new Types.ObjectId(teamId),
-            datasetId: new Types.ObjectId(datasetId),
-            collectionId: { $in: collectionIds }
-          }
-        },
-        {
-          $group: {
-            _id: '$collectionId',
-            count: { $sum: 1 }
-          }
-        }
-      ],
-      {
-        ...readFromSecondary
-      }
-    )
-  ]);
-
-  const list = await Promise.all(
-    pageCollections.map(async (item) => ({
-      ...item,
-      tags: await collectionTagsToTagLabel({
-        datasetId,
-        tags: item.tags
-      }),
-      dataAmount: dataAmount.find((amount) => String(amount._id) === String(item._id))?.count || 0,
-      ...formatTrainingStatus(
-        trainingAmount.find((amount) => String(amount._id) === String(item._id))
-      ),
-      permission
-    }))
-  );
-
-  // count collections
-  return ListCollectionV2ResponseSchema.parse({ list, total });
+  return buildListResponse(pageCollections, total);
 }
-
 export default NextAPI(handler);

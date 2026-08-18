@@ -127,9 +127,12 @@ export async function syncDatasetCollectionFolders({
 /**
  * 同步单个 Dataset 下的根 Collection Folder（parentId 为空且继承态）：
  * - `syncCollaborators`：并入 Dataset 有效 clbs（owner→manage，sumPer，不删除既有协作者）；
- * - `syncChildrenPermission`：向继承态子 folder 传播。
+ * - `syncChildrenPermission`：向继承态子 folder 传播。传给子 folder 的 rootClbs 需先做
+ *   owner→manage 映射——子 folder 继承的是根 folder 的实际快照（父级 owner 封顶为 manage），
+ *   否则子 folder 会缺失父级 owner 的 manage 记录，与 `syncCollaborators` 写入根 folder
+ *   的快照不一致（folder 鉴权只读自身快照，不能缺）。
  */
-const syncRootCollectionFolders = async ({
+export const syncRootCollectionFolders = async ({
   teamId,
   datasetId,
   rootClbs,
@@ -174,7 +177,7 @@ const syncRootCollectionFolders = async ({
       resourceType: PerResourceTypeEnum.collection,
       resourceModel: MongoDatasetCollection,
       session,
-      collaborators: rootClbs
+      collaborators: mergeCollaboratorList({ parentClbs: rootClbs, childClbs: [] })
     });
   }
 };

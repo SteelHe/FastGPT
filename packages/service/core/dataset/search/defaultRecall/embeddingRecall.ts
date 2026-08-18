@@ -140,7 +140,7 @@ export const embeddingRecall = async ({
   imageCaptionQueries,
   limit,
   forbidCollectionIdList,
-  effectiveCollectionIdList
+  filterCollectionIdList
 }: {
   teamId: string;
   datasetIds: string[];
@@ -151,7 +151,7 @@ export const embeddingRecall = async ({
   limit: number;
   forbidCollectionIdList: string[];
   /** 授权集合 ∩ 元数据条件 - forbid 后实际生效的 collectionId 过滤 */
-  effectiveCollectionIdList?: string[];
+  filterCollectionIdList?: string[];
 }): Promise<
   ReturnType<typeof emptyEmbeddingRecallResult> & {
     tokens: number;
@@ -186,7 +186,7 @@ export const embeddingRecall = async ({
         vector,
         limit,
         forbidCollectionIdList,
-        filterCollectionIdList: effectiveCollectionIdList
+        filterCollectionIdList: filterCollectionIdList
       });
     })
   );
@@ -198,11 +198,11 @@ export const embeddingRecall = async ({
     new Set(recallResults.map((item) => item.results.map((item) => item.id?.trim())).flat())
   );
 
-  // 授权集合防线：Mongo 回查时再次按 effectiveCollectionIdList 过滤，
+  // 授权集合防线：Mongo 回查时再次按 filterCollectionIdList 过滤，
   // 防止索引延迟/旧向量/缓存导致越权结果。非授权集合的 collectionId 直接不参与回查。
-  const effectiveSet = effectiveCollectionIdList ? new Set(effectiveCollectionIdList) : undefined;
-  const safeCollectionIdList = effectiveSet
-    ? collectionIdList.filter((id) => effectiveSet.has(id))
+  const filterSet = filterCollectionIdList ? new Set(filterCollectionIdList) : undefined;
+  const safeCollectionIdList = filterSet
+    ? collectionIdList.filter((id) => filterSet.has(id))
     : collectionIdList;
 
   const [dataMaps, collectionMaps] = await Promise.all([

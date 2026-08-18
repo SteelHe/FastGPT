@@ -131,7 +131,8 @@ describe('resumeCollectionInheritPermission ', () => {
     const collectionDoc = await MongoDatasetCollection.findById(folderId).lean();
     await resumeCollectionInheritPermission({ collection: collectionDoc, teamId });
 
-    // F snapshot rebuilt: dataset(owner->manage) + own owner => only read is inherited from dataset
+    // F snapshot: parent(dataset read) merged into own independent clbs (owner + private M1 write)
+    // syncCollaborators 为 sumPer 累加：M1 原 write(0b010) | 父级 read(0b100) = 0b110
     const folderClbs = await getResourceOwnedClbs({
       resourceType: PerResourceTypeEnum.collection,
       teamId,
@@ -140,7 +141,7 @@ describe('resumeCollectionInheritPermission ', () => {
     const fMap = clbMap(folderClbs);
     expect(fMap.size).toBe(2);
     expect(fMap.get(String(users.owner.tmbId))).toBe(OwnerRoleVal);
-    expect(fMap.get(String(users.members[0].tmbId))).toBe(ReadRoleVal);
+    expect(fMap.get(String(users.members[0].tmbId))).toBe(WriteRoleVal | ReadRoleVal);
 
     // inherited child folder synced to the rebuilt snapshot
     const childClbs = await getResourceOwnedClbs({
@@ -157,7 +158,7 @@ describe('resumeCollectionInheritPermission ', () => {
     expect(folderDoc?.inheritPermission).toBe(true);
   });
 
-  it('CC-006: folder resume with no parent permission keeps only the owner record', async () => {
+  it('CC-006: folder resume with no parent permission keeps the owner and any independent clbs', async () => {
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const dataset = await createDataset({ teamId, tmbId: users.owner.tmbId });
@@ -193,14 +194,16 @@ describe('resumeCollectionInheritPermission ', () => {
     const collectionDoc = await MongoDatasetCollection.findById(folderId).lean();
     await resumeCollectionInheritPermission({ collection: collectionDoc, teamId });
 
+    // 无父级权限：syncCollaborators 空合并 → 自身独立 clbs（owner + M1 write）全部保留
     const folderClbs = await getResourceOwnedClbs({
       resourceType: PerResourceTypeEnum.collection,
       teamId,
       resourceId: folderId
     });
     const byId = clbMap(folderClbs);
-    expect(byId.size).toBe(1);
+    expect(byId.size).toBe(2);
     expect(byId.get(String(users.owner.tmbId))).toBe(OwnerRoleVal);
+    expect(byId.get(String(users.members[0].tmbId))).toBe(WriteRoleVal);
 
     const folderDoc = await MongoDatasetCollection.findById(folderId).lean();
     expect(folderDoc?.inheritPermission).toBe(true);
@@ -300,7 +303,7 @@ describe('resumeCollectionInheritPermission ', () => {
     const collectionDoc = await MongoDatasetCollection.findById(folderId).lean();
     await resumeCollectionInheritPermission({ collection: collectionDoc, teamId });
 
-    // F rebuilt from dataset read (owner + M1 read)
+    // F: parent(dataset read) 并入自身独立 clbs（M1 原 write | read = 0b110）
     const fClbs = clbMap(
       await getResourceOwnedClbs({
         resourceType: PerResourceTypeEnum.collection,
@@ -308,7 +311,7 @@ describe('resumeCollectionInheritPermission ', () => {
         resourceId: folderId
       })
     );
-    expect(fClbs.get(String(users.members[0].tmbId))).toBe(ReadRoleVal);
+    expect(fClbs.get(String(users.members[0].tmbId))).toBe(WriteRoleVal | ReadRoleVal);
 
     // G (non-inherited) keeps its independent write grant
     const gClbs = clbMap(

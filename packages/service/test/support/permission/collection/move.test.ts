@@ -97,7 +97,7 @@ describe('moveCollectionPermission ', { timeout: 120000 }, () => {
     return { users, teamId, datasetId };
   };
 
-  it('CM-004: move with inheritPermission=true inherits target parent clbs, deletes source-specific old clbs, re-syncs inherited child folders', async () => {
+  it('CM-004: move with inheritPermission=true merges target parent clbs into own (keeps own clbs), re-syncs inherited child folders', async () => {
     const { users, teamId, datasetId } = await setup();
     const owner = String(users.owner.tmbId);
     const m1 = String(users.members[0].tmbId);
@@ -189,18 +189,18 @@ describe('moveCollectionPermission ', { timeout: 120000 }, () => {
     expect(String(updatedC!.parentId)).toBe(f2Id);
     expect(updatedC!.inheritPermission).toBe(true);
 
-    // C snapshot = new parent f2 clbs + own owner; old m1 read deleted
+    // C snapshot = own clbs + target parent f2 clbs merged (sumPer keeps own owner and m1)
     const cClbs = clbMap(await getCollectionClbs(cId, teamId));
     expect(cClbs.get(owner)?.permission).toBe(OwnerRoleVal);
     expect(cClbs.get(m2)?.permission).toBe(WriteRoleVal);
-    expect(cClbs.has(m1)).toBe(false);
+    expect(cClbs.get(m1)?.permission).toBe(ReadRoleVal); // 源父级 clbs 并入后保留（sumPer）
 
-    // inherited child CC re-synced to the new snapshot via syncChildrenPermission (sumPer)：
-    // 新增 m2-write；m1 因父级 C 已无对应记录（保守删除条件不满足）保留原 read
+    // inherited child CC re-synced via syncChildrenPermission：新增 m2-write；
+    // m1 现在存在于父级 C 且不在最新快照中（保守删除条件满足）→ 删除
     const ccClbs = clbMap(await getCollectionClbs(ccId, teamId));
     expect(ccClbs.get(owner)?.permission).toBe(OwnerRoleVal);
     expect(ccClbs.get(m2)?.permission).toBe(WriteRoleVal);
-    expect(ccClbs.get(m1)?.permission).toBe(ReadRoleVal);
+    expect(ccClbs.has(m1)).toBe(false);
   });
 
   it('CM-005: move with inheritPermission=false only updates parentId, keeps own independent clbs, does not merge target parent', async () => {
@@ -281,7 +281,7 @@ describe('moveCollectionPermission ', { timeout: 120000 }, () => {
     expect(cClbs.has(m1)).toBe(false);
   });
 
-  it('move with inheritPermission=true to root (targetParentId=null) clears all parent-derived clbs and keeps only own owner', async () => {
+  it('move with inheritPermission=true to root (targetParentId=null) merges the Dataset effective clbs, keeps own clbs', async () => {
     const { users, teamId, datasetId } = await setup();
     const owner = String(users.owner.tmbId);
     const m1 = String(users.members[0].tmbId);
@@ -335,8 +335,10 @@ describe('moveCollectionPermission ', { timeout: 120000 }, () => {
     expect(updatedC!.parentId).toBe(null);
     expect(updatedC!.inheritPermission).toBe(true);
 
+    // 根目录父级 = 所属 Dataset；本用例 Dataset 无 clbs（effective=[]），
+    // syncCollaborators 为空合并 → 自身 owner 与已有 clbs 全部保留
     const cClbs = clbMap(await getCollectionClbs(cId, teamId));
     expect(cClbs.get(owner)?.permission).toBe(OwnerRoleVal);
-    expect(cClbs.has(m1)).toBe(false);
+    expect(cClbs.get(m1)?.permission).toBe(ReadRoleVal);
   });
 });

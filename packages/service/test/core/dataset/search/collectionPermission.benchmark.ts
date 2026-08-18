@@ -5,10 +5,8 @@ import { PerResourceTypeEnum, ReadRoleVal } from '@fastgpt/global/support/permis
 import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
-import {
-  getReadableCollectionIds,
-  resolveReadableCollectionIds
-} from '@fastgpt/service/support/permission/collection/readableCollection';
+import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
 import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/collection/list/flatten';
 import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/type';
 import { getFakeUsers } from '@test/datas/users';
@@ -208,7 +206,12 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const m1 = String(users.members[0].tmbId);
-    const dataset = await MongoDataset.create({ teamId, tmbId: users.owner.tmbId, name: 'D' });
+    const dataset = await MongoDataset.create({
+      teamId,
+      tmbId: users.owner.tmbId,
+      name: 'D',
+      hasSetCollectionPermissions: true
+    });
     const datasetId = String(dataset._id);
 
     const items = await seedCollections({
@@ -232,7 +235,8 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
         datasetIds: [datasetId],
         tmbId: m1
       });
-      expect(readable.length).toBe(100);
+      // 全继承 + dataset read → 授权集合覆盖全部文件 → 短路返回 undefined
+      expect(readable).toBeUndefined();
     });
     // 检索 100 文件 < 100ms（本地真实 MongoDB 可达；内存版可能略高，留余量记录实测值）
     console.log(`  RAG 100 实测平均 ${avg.toFixed(1)}ms（设计目标 <100ms，机器相关）`);
@@ -242,7 +246,12 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const m1 = String(users.members[0].tmbId);
-    const dataset = await MongoDataset.create({ teamId, tmbId: users.owner.tmbId, name: 'D' });
+    const dataset = await MongoDataset.create({
+      teamId,
+      tmbId: users.owner.tmbId,
+      name: 'D',
+      hasSetCollectionPermissions: true
+    });
     const datasetId = String(dataset._id);
 
     const items = await seedCollections({
@@ -266,7 +275,8 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
         datasetIds: [datasetId],
         tmbId: m1
       });
-      expect(readable.length).toBe(COLLECTION_COUNT);
+      // 全继承 + dataset read → 授权集合覆盖全部文件 → 短路返回 undefined
+      expect(readable).toBeUndefined();
     });
     // 检索 1w 文件 < 500ms（机器相关，记录实测值）
     console.log(`  RAG 1w 实测平均 ${avg.toFixed(1)}ms（设计目标 <500ms，机器相关）`);

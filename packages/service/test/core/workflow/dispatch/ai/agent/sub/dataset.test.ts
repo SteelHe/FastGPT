@@ -24,9 +24,15 @@ vi.mock('@fastgpt/service/core/dataset/search', () => ({
   defaultSearchDatasetData: defaultSearchDatasetDataMock
 }));
 
-vi.mock('@fastgpt/service/support/permission/collection/readableCollection', () => ({
-  resolveReadableCollectionIds: resolveReadableCollectionIdsMock
-}));
+vi.mock(
+  '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection')
+    >()),
+    resolveReadableCollectionIds: resolveReadableCollectionIdsMock
+  })
+);
 
 vi.mock('@fastgpt/service/core/dataset/schema', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@fastgpt/service/core/dataset/schema')>()),

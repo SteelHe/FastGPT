@@ -6,7 +6,7 @@ import {
   ReadRoleVal
 } from '@fastgpt/global/support/permission/constant';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
-import { resolveReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
 import {
   computeEffectiveCollectionIdList,
   decideCollectionFilter
@@ -112,8 +112,7 @@ describe('scenario 11: RAG recall only includes readable collections', () => {
       const decision = decideCollectionFilter({
         allowedCollectionIdList: allowed,
         filterCollectionIdList: undefined,
-        forbidCollectionIdList: [],
-        totalFileCollectionCount: 3
+        forbidCollectionIdList: []
       });
       expect(decision.isEmpty).toBe(false);
       expect(decision.collectionFilter?.sort()).toEqual(
@@ -126,8 +125,7 @@ describe('scenario 11: RAG recall only includes readable collections', () => {
       const emptyDecision = decideCollectionFilter({
         allowedCollectionIdList: allowed,
         filterCollectionIdList: [String(c2._id)],
-        forbidCollectionIdList: [],
-        totalFileCollectionCount: 3
+        forbidCollectionIdList: []
       });
       expect(emptyDecision.isEmpty).toBe(true);
     },
@@ -170,15 +168,13 @@ describe('scenario 11: RAG recall only includes readable collections', () => {
       // m1: dataset read（前置门槛）
       await addDatasetClb({ teamId, resourceId: datasetId, tmbId: m1, permission: ReadRoleVal });
 
-      // 短路：无任何 collection 自定义权限 → 全部文件 collection 可读（folder 展开为文件），无需逐 collection 权限记录
+      // 短路：无任何 collection 自定义权限（flag=false）→ 无需 collection 级过滤，返回 undefined
       const allowed = await resolveReadableCollectionIds({
         teamId,
         datasetIds: [datasetId],
         tmbId: m1
       });
-      expect(allowed.sort()).toEqual(
-        [String(c1._id), String(c2._id), String(folderFile._id)].sort()
-      );
+      expect(allowed).toBeUndefined();
     },
     TIMEOUT
   );

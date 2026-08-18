@@ -21,7 +21,7 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度到 `
 4. 无权限文件夹下的有权限内容可平铺展示，隐藏完整路径。
 5. 知识库列表搜索限定当前路径，不全局搜索。
 6. 知识库检索（RAG 召回）按文件级权限过滤。
-7. 性能：1w文件+权限配置 列表不超过2s、知识检索节点增加时延 100文件<100ms, 1w文件<500ms
+7. 性能：1w文件+权限配置 列表不超过2s、知识检索节点增加时延 100文件<200ms, 1w文件<1s；未配置文件权限，不影响检索性能
 
 ---
 
@@ -40,7 +40,7 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度到 `
 
 ### 2.2 数据模型
 
-#### 2.2.1 `datasets` 表（已有字段补充）
+#### 2.2.1 `datasets` 表（新增字段）
 
 ```typescript
 {
@@ -526,20 +526,21 @@ resolvePermission(resourceId, resourceType, tmbId):
 - **输入**：
   - `collectionId`
   - `parentId`：目标位置（`null` 表示根目录）
-  - `inheritPermission`：可选布尔，默认 `true`
+  - `inheritPermission`：可选布尔，未传时保持 Collection 原继承状态（不再默认 `true`）
 - **策略**：
   - `inheritPermission=true`（默认）：沿用当前 Dataset move 的权限同步语义，继承新父级权限；执行 `syncCollaborators + syncChildrenPermission`，并同步 Collection Folder 及其下级继承态 Collection Folder 的权限快照。
   - `inheritPermission=false`：保持 Collection 原有独立配置，仅更新 `parentId`，不继承新父级 clbs；其下已有独立配置的子资源保持不变。
 - **事务中**：
-  - 若 `inheritPermission=true`：读取新父级 clbs，自身快照 = merge(新父级, [自身 owner]) 全量替换（删除源目录特有旧 clb）；继承态子 folder 经 `syncChildrenPermission` 同步（sumPer 累加、保守删除）。
+  - 若 `inheritPermission=true`：目标父级 clbs = 目标父 Collection Folder 快照，`targetParentId` 为空（根目录）时为所属 Dataset 有效 clbs（`getDatasetEffectiveClbs`）。folder 经 `syncCollaborators` 并入目标父级 clbs（owner→manage，sumPer 保留自身独立 clbs 与 owner），再经 `syncChildrenPermission` 向继承态子 folder 同步（sumPer 累加、保守删除）；非 folder 仅 `syncCollaborators` 合并目标父级 clbs。
   - 若 `inheritPermission=false`：仅更新 `parentId`，保留自身独立 clbs。
+  - `inheritPermission` 未传时保持 Collection 原有继承状态（不再默认 `true`）。
 
 ### 6.9 恢复 Collection 继承
 
 - 入口：`POST /api/core/dataset/collection/resumeInheritPermission`
 - 逻辑与当前 `resumeInheritPermission` 实现保持一致，并补充 Collection 级处理：
   - 非 folder：置 `inheritPermission=true`，后续动态合并父级权限。
-  - folder：重建自身快照 = merge(父级 clbs, [自身 owner]) 全量替换，置 `inheritPermission=true`，继承态子 folder 经 `syncChildrenPermission` 同步（sumPer）。
+  - folder：经 `syncCollaborators` 并入父级 clbs（owner→manage，sumPer 保留自身独立 clbs 与 owner），置 `inheritPermission=true`，继承态子 folder 经 `syncChildrenPermission` 同步（sumPer）。
   - 非继承态子 Collection / Collection Folder 保持独立配置，不被恢复继承操作覆盖。
 
 ---
@@ -883,9 +884,11 @@ flowchart TD
 **统一处理流程**：
 
 1. **Dataset 前置鉴权**：检索入口先使用现有 Dataset 鉴权，过滤出用户有 `read` 权限的 Dataset；没有 Dataset `read` 时直接不参与检索。
-2. **解析可读 Collection 集合**：调用统一的批量 Collection 权限解析函数，输入 `teamId、datasetIds、tmbId`，按 Collection owner、自身权限、Dataset / Collection Folder 继承权限计算有效权限，返回 `allowedCollectionIdList`。
-   - 团队管理员 / 团队所有者：在 Dataset 鉴权通过后可直接将 Dataset 下所有 Collection 作为允许集合。
-   - `hasSetCollectionPermissions === false`（§6.4.3）：优先校验该字段，纯继承 Dataset 在 read 通过后直接将其下全部文件 Collection 作为允许集合，跳过逐 Collection 解析。
+2. **解析可读 Collection 集合**：调用统一的批量 Collection 权限解析函数 `resolveReadableCollectionIds`，输入 `teamId、datasetIds、tmbId`，按 Collection owner、自身权限、Dataset / Collection Folder 继承权限计算有效权限，返回 `allowedCollectionIdList`。
+   - 团队管理员 / 团队所有者：直接返回 `undefined`（无 collection 级过滤需求，检索层按 Dataset 级别召回，跳过 collection 查询）。
+   - 全部目标 Dataset 均 `hasSetCollectionPermissions === false`（纯继承）且 read 通过：返回 `undefined`（同上短路）。
+   - 否则返回实际文件 Collection ID（Folder 递归展开为实际文件 ID）；Dataset read 未通过的 Dataset 在内部整体排除。
+   - `undefined` 语义：由 `decideCollectionFilter` 识别为「无需权限过滤」，不设置 `collectionId IN`，跳过全量判定比较。
    - Collection Folder 使用已同步权限快照；普通 Collection 动态合并 Dataset / Collection Folder 有效权限。
    - 只返回有效权限达到 `read` 的实际文件 Collection ID；Folder ID 需要先递归展开为其下实际文件 Collection ID，不能只把 Folder ID 传给召回层。
 3. **合并检索条件**：将 `allowedCollectionIdList` 与用户通过标签、时间、指定 Folder / Collection 等元数据形成的 `filterCollectionIdList` 求交集；同时排除 `forbidCollectionIdList`，得到 `effectiveCollectionIdList`。
@@ -904,7 +907,7 @@ flowchart TD
 
 **推荐代码落点**：
 
-- 权限解析：在 `packages/service/support/permission/dataset/auth.ts` 或 Dataset 权限工具中新增批量 `resolveReadableCollectionIds`。
+- 权限解析：`resolveReadableCollectionIds` 位于 `packages/service/core/dataset/search/defaultRecall/effectiveCollection.ts`（与 `computeEffectiveCollectionIdList` / `decideCollectionFilter` 同一"collection 过滤决策"模块，管线内聚）；`getReadableCollectionIds` / `canShortCircuitCollectionPermission` 位于 `packages/service/support/permission/collection/readableCollection.ts`。
 - 检索入口：在工作流 Dataset search、Agent Dataset search、search-test 完成 Dataset 鉴权后传入 `allowedCollectionIdList`。
 - 统一合并：在 `packages/service/core/dataset/search/defaultRecall/multiQueryRecall.ts` 将授权集合与元数据 Collection 条件求交集。
 - 召回下沉：由 `embeddingRecall.ts`、`fullTextRecall.ts` 继续将同一 `effectiveCollectionIdList` 传入向量库和全文查询。
@@ -1045,32 +1048,26 @@ flowchart TD
 对每个 Dataset 执行以下步骤：
 
 1. **初始化字段**：为所有存量 Collection 写入 `inheritPermission=true`。升级前 Collection 没有该字段和独立权限语义，因此迁移不保留 `false` 分支。
-2. **构建 Collection 树**：按 `parentId` 建立 Collection Folder 的父子关系，并检测循环引用和孤儿 `parentId`。
-3. **按拓扑顺序处理 Folder**：从 Dataset 根到最深层 Collection Folder，确保父级快照先完成。
-4. **处理 Collection Folder 快照**：
-   - 所有存量 Collection Folder 均按 `inheritPermission=true` 处理。
-   - 读取父级有效权限，将父级 owner 映射为 `manage`，合并 Collection Folder 自身 owner，重建该 Folder 的 `resource_permissions` 快照。
-   - 按父级到子级的顺序继续处理所有下级 Collection Folder。
-5. **处理普通 Collection**：
-   - 所有存量普通 Collection 均设置为 `inheritPermission=true`。
-   - 使用 Collection 文档的 `tmbId` 创建唯一 owner 记录。
-   - 不复制完整父级权限快照；鉴权时动态合并所属 Dataset / Collection Folder 的有效权限。
-6. **清理和校验**：删除升级过程中生成的重复 owner 记录；校验每个 Collection 的 owner 唯一、所有存量 Collection 均为继承态、Collection Folder 快照与父级有效权限一致。
-7. **提交进度**：每个 Dataset 或固定批次在独立事务中提交升级状态；失败批次记录错误并支持重试，不阻断其他 Dataset。
+2. **创建 owner 记录**：为所有存量 Collection 创建创建者（owner）权限记录（`resource_permissions` 唯一键 upsert，幂等）。
+3. **检测异常数据**：构建 Collection 树检测循环引用和孤儿 `parentId`（循环 folder 会让 `syncChildrenPermission` 成环遍历，须临时退出继承态；孤儿 folder 无法从根可达，按根处理）。
+4. **调用 `syncRootCollectionFolders` 重建 Folder 快照**：根继承态 Collection Folder 并入 Dataset 有效 clbs（owner→manage），经 `syncChildrenPermission` 传播到全部继承态子 Folder——复用与运行时一致的通用原语，避免迁移与运行时同步语义漂移。
+5. **处理孤儿 folder**：孤儿 folder 视为根，直接并入 Dataset 有效 clbs。
+6. **清理和校验**：删除升级过程中生成的重复 owner 记录；校验每个 Collection 的 owner 唯一、所有存量 Collection 均为继承态、Collection Folder 快照与 Dataset 有效 clbs + 自身 owner 一致。
+7. **提交进度**：每个 Dataset 或固定批次在独立事务中提交升级状态（循环 folder 不标记迁移版本，修复后重跑可再处理）；失败批次记录错误并支持重试，不阻断其他 Dataset。
 
 ### 12.4 权限刷新的具体规则
 
 | 资源 | `inheritPermission` | 升级时写入内容 | 父级权限变化后的行为 |
 |------|---------------------|----------------|----------------------|
 | Dataset Folder | `true` | 保持现有 Dataset Folder 快照，并按现有逻辑校验/补齐 owner | 由 `syncChildrenPermission` 向下同步继承态 Folder |
-| Collection Folder（存量升级） | `true` | Dataset / 父 Collection Folder 有效权限快照 + 当前 Collection owner | Dataset 或父 Folder 权限变化时同步自身及继承态子 Folder |
+| Collection Folder（存量升级） | `true` | Dataset 有效 clbs（owner→manage）+ 当前 Collection owner | 由 `syncRootCollectionFolders` + `syncChildrenPermission` 重建自身及继承态子 Folder 快照 |
 | 普通 Collection（存量升级） | `true` | 当前 Collection owner；不复制完整父级快照 | 鉴权时动态合并 Dataset / Collection Folder 权限 |
 
 ### 12.5 升级一致性、幂等与回滚
 
 - 升级写入使用 `mongoSessionRun`，Collection 字段、权限快照和迁移状态在同一事务中提交。
 - 权限写入使用 `resourceType + resourceId + tmbId/groupId/orgId` 唯一键和 upsert，重复执行不会产生重复记录。
-- Folder 快照采用“先计算目标集合，再按资源批量替换”的方式，避免旧协作者残留；非继承态资源不得执行替换。
+- Folder 快照统一复用运行时通用原语 `syncCollaborators` + `syncChildrenPermission`（sumPer 累加、保守删除），与运行时同步一致；非继承态资源不被覆盖。
 - 建议增加迁移版本号或 `permissionMigrationVersion`，仅处理未完成或版本落后的资源。
 - 单批失败回滚当前批次，并记录 `datasetId / collectionId / error`；下一批可继续执行。
 - 升级完成后执行校验任务：随机抽样比较 Dataset、Collection Folder 快照、普通 Collection 动态解析结果，确认列表、详情和检索鉴权一致。

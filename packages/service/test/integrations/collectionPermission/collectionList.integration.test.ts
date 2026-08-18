@@ -11,11 +11,9 @@ import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { authDatasetCollection } from '@fastgpt/service/support/permission/dataset/auth';
-import {
-  getReadableCollectionIds,
-  resolveReadableCollectionIds
-} from '@fastgpt/service/support/permission/collection/readableCollection';
+import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
 import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/collection/list/flatten';
+import { filterDatasetsByTmbId } from '@fastgpt/service/core/dataset/utils';
 import { replaceRegChars } from '@fastgpt/global/common/string/tools';
 import { parseParentIdInMongo } from '@fastgpt/global/common/parentFolder/utils';
 import { getFakeUsers } from '@test/datas/users';
@@ -245,14 +243,12 @@ describe('scenario 8: knowledge base gate — collection permission cannot bypas
       // non-inherited collection with an own read record still resolves as "collection readable";
       // the dataset is hidden by the caller's authDataset gate, verified above.
 
-      // search / RAG path: the per-dataset gate inside resolveReadableCollectionIds excludes
-      // the whole dataset, so no file is recallable
-      const ragReadable = await resolveReadableCollectionIds({
-        teamId,
-        datasetIds: [datasetId],
-        tmbId: m1
-      });
-      expect(ragReadable).toEqual([]);
+      // search / RAG 路径：Dataset read 门槛由**调用方预过滤**（`filterDatasetsByTmbId` /
+      // `authDataset`）在传入 `resolveReadableCollectionIds` 前排除无 read 的 Dataset。
+      // `resolveReadableCollectionIds` 信任调用方传入的 datasetIds，不再重复鉴权——此处单独调用
+      // 会返回 c1（c1 有自身 collection read 记录）。真正的知识库门槛在上游：
+      const filteredDatasets = await filterDatasetsByTmbId({ datasetIds: [datasetId], tmbId: m1 });
+      expect(filteredDatasets).toEqual([]); // 无 dataset read → dataset 被预过滤排除
     },
     TIMEOUT
   );

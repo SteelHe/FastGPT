@@ -16,9 +16,13 @@ vi.mock('@fastgpt/service/support/permission/dataset/auth', () => ({
   authDataset: mockAuthDataset
 }));
 
-vi.mock('@fastgpt/service/support/permission/collection/readableCollection', () => ({
-  resolveReadableCollectionIds: mockResolveReadableCollectionIds
-}));
+vi.mock(
+  '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection',
+  async (importOriginal) => ({
+    ...(await importOriginal()),
+    resolveReadableCollectionIds: mockResolveReadableCollectionIds
+  })
+);
 
 vi.mock('@fastgpt/service/support/permission/teamLimit', () => ({
   checkTeamAIPoints: mockCheckTeamAIPoints

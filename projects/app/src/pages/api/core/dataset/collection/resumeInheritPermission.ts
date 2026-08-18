@@ -13,8 +13,8 @@ import {
  * Route: POST /api/core/dataset/collection/resumeInheritPermission
  * Auth: Collection manage
  * - 非 folder：置 inheritPermission=true，不写快照（后续动态合并）。
- * - folder：读取父级（Dataset 有效权限或父 Collection Folder 快照）clbs，
- *   owner→manage 映射 + 自身 owner 重建快照，同步继承态子 folder，置 inheritPermission=true。
+ * - folder：将父级（Dataset 有效权限或父 Collection Folder 快照）clbs 经 `syncCollaborators`
+ *   并入自身（owner→manage，sumPer 保留自身独立 clbs 与 owner），同步继承态子 folder，置 inheritPermission=true。
  * - 非继承态子 Collection / Collection Folder 不被覆盖。
  */
 

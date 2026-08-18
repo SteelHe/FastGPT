@@ -9,7 +9,7 @@ import {
 } from '@fastgpt/global/support/permission/constant';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { authDatasetCollection } from '@fastgpt/service/support/permission/dataset/auth';
-import { resolveReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
 import { getFakeUsers } from '@test/datas/users';
 import { createCollection, createDataset } from './helpers';
 
@@ -54,13 +54,13 @@ describe('Error-1: team owner/admin bypass on a non-inherited collection ', () =
       }).lean();
       expect(clbs).toHaveLength(0);
 
-      // 1) list-visible consistency: the shared RAG/list resolver short-circuits team owner
+      // 1) list-visible consistency: 团队 owner/admin 短路 → undefined（RAG 不设 collectionId 过滤，全部可见）
       const readable = await resolveReadableCollectionIds({
         teamId,
         datasetIds: [datasetId],
         tmbId: ownerTmb
       });
-      expect(readable).toContain(collectionId);
+      expect(readable).toBeUndefined();
 
       // 2) single-resource auth: team owner passes read and manage (previously denied -> Error-1)
       const readResult = await authDatasetCollection({

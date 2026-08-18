@@ -1,17 +1,8 @@
-import {
-  NullRoleVal,
-  PerResourceTypeEnum,
-  ReadPermissionVal,
-  ReadRoleVal
-} from '@fastgpt/global/support/permission/constant';
+import { PerResourceTypeEnum, ReadRoleVal } from '@fastgpt/global/support/permission/constant';
 import { Permission } from '@fastgpt/global/support/permission/controller';
 import type { PermissionValueType } from '@fastgpt/global/support/permission/type';
 import { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
 import { getTmbInfoByTmbId } from '../../user/team/controller';
-import { authDatasetByTmbId } from '../dataset/auth';
-import { getGroupsByTmbId } from '../memberGroup/controllers';
-import { getOrgIdSetWithParentByTmbId } from '../org/controllers';
-import { MongoDatasetCollection } from '../../../core/dataset/collection/schema';
 import { MongoDataset } from '../../../core/dataset/schema';
 import { MongoResourcePermission } from '../schema';
 import type { CollectionPermissionItemType } from './type';
@@ -160,196 +151,40 @@ export async function getReadableCollectionIds({
 }
 
 /**
- * 批量解析可读（有效权限 ≥ read）的实际文件 Collection ID。
+ * 判断 Collection 级权限是否可整体短路（无需逐 collection 解析）：
+ * - 团队 owner/admin：对该团队全部 dataset 可读；
+ * - 普通成员：所有目标 Dataset 均为纯继承（`hasSetCollectionPermissions=false`），
+ *   每个 Collection 有效权限 = Dataset 有效权限。
  *
- * RAG 检索入口在 Dataset read 鉴权通过后调用，输入 teamId + datasetIds + tmbId，返回
- * 允许召回的**实际文件 Collection ID**（Folder 已递归展开为其下实际文件 ID，folder 本身
- * 不参与召回）。与 `getReadableCollectionIds` 复用同一语义：
- * - Dataset read 前置门槛：逐个 Dataset 调用 `authDatasetByTmbId(per: read)`，无 read 的
- *   Dataset 整体排除（RF-005，仅 collection 权限不能绕过 dataset 门槛）。
- * - 团队 owner/admin：在 Dataset read 门槛通过后直接返回该 Dataset 下全部文件 Collection ID，
- *   跳过逐 collection 权限解析（性能短路）。
- * - 普通成员：按 datasetId 分组调用 `getReadableCollectionIds`，group/org 权限记录同样生效。
+ * 满足时返回 `true`，调用方（RAG 检索 / Collection 列表）可跳过 collection 权限过滤，
+ * 按 Dataset / 目录级别处理以节省性能。
+ * 前置条件：调用方已按 Dataset read 过滤 `datasetIds`；本函数不做 Dataset read 鉴权。
  */
-export async function resolveReadableCollectionIds({
+export async function canShortCircuitCollectionPermission({
   teamId,
   datasetIds,
-  tmbId
+  tmbId,
+  tmbInfo
 }: {
   teamId: string;
   datasetIds: string[];
   tmbId: string;
-}): Promise<string[]> {
-  if (datasetIds.length === 0) return [];
+  /** 可选：已解析的 tmb 信息，避免重复查询。 */
+  tmbInfo?: Awaited<ReturnType<typeof getTmbInfoByTmbId>>;
+}): Promise<boolean> {
+  if (datasetIds.length === 0) return true;
 
-  // 团队上下文校验 + owner/admin 判定（只解析一次 tmb 信息）
-  const tmbInfo = await getTmbInfoByTmbId({ tmbId });
-  if (String(tmbInfo.teamId) !== String(teamId)) return [];
+  const info = tmbInfo ?? (await getTmbInfoByTmbId({ tmbId }));
+  if (String(info.teamId) !== String(teamId)) return false;
+  if (info.permission.isOwner || info.permission.hasManagePer) return true;
 
-  const isTeamOwnerOrAdmin = tmbInfo.permission.isOwner || tmbInfo.permission.hasManagePer;
-
-  // 团队 owner/admin：跳过逐 collection 权限解析，但仍需逐 Dataset 通过 read 门槛
-  if (isTeamOwnerOrAdmin) {
-    return resolveOwnerAdminFileCollectionIds({ teamId, datasetIds, tmbId });
-  }
-
-  // 普通成员：批量读取 Dataset 下全部 Collection 最小字段，按 datasetId 分组解析
-  const collections = await MongoDatasetCollection.find(
-    {
-      teamId,
-      datasetId: { $in: datasetIds }
-    },
-    '_id datasetId parentId tmbId inheritPermission type'
-  ).lean();
-
-  const collectionsByDataset = new Map<string, CollectionPermissionItemType[]>();
-  for (const item of collections) {
-    const datasetId = String(item.datasetId);
-    const list = collectionsByDataset.get(datasetId) ?? [];
-    list.push({
-      _id: item._id as never,
-      tmbId: item.tmbId as never,
-      parentId: item.parentId ? String(item.parentId) : null,
-      inheritPermission: item.inheritPermission,
-      type: item.type as never
-    });
-    collectionsByDataset.set(datasetId, list);
-  }
-
-  // group/org 权限记录在批量查询端生效（buildPermissionQuery 的 $or 分支）
-  const [groupIds, orgIds] = await Promise.all([
-    getGroupsByTmbId({ tmbId, teamId }).then((list) => list.map((item) => String(item._id))),
-    getOrgIdSetWithParentByTmbId({ tmbId, teamId }).then((set) => Array.from(set).map(String))
-  ]);
-
-  // 批量加载各 Dataset 的 hasSetCollectionPermissions：显式 `false`（纯继承）时
-  // 直接短路为 Dataset 级鉴权，跳过逐 Collection 批量权限查询（1 次查询替代 N+1 / distinct）。
-  // 旧数据字段缺失（undefined）视为未知，不短路，走完整解析（正确性优先，迁移后统一为显式 false）。
-  const datasetFlags = new Map<string, boolean | undefined>();
+  // 普通成员：全部 Dataset 显式 false（纯继承）才短路；旧数据 undefined 视为未知，不短路。
   const datasets = await MongoDataset.find(
     { _id: { $in: datasetIds } },
     'hasSetCollectionPermissions'
   ).lean();
-  for (const ds of datasets) {
-    datasetFlags.set(String(ds._id), ds.hasSetCollectionPermissions);
-  }
-
-  const readableIds = new Set<string>();
-  for (const [datasetId, perDatasetCollections] of collectionsByDataset) {
-    // Dataset read 前置门槛（RF-005）
-    let datasetPermission: PermissionValueType;
-    try {
-      const { dataset } = await authDatasetByTmbId({
-        tmbId,
-        datasetId,
-        per: ReadPermissionVal
-      });
-      datasetPermission = dataset.permission.role;
-    } catch {
-      continue;
-    }
-
-    const perDatasetReadable = await getReadableCollectionIds({
-      collections: perDatasetCollections,
-      tmbId,
-      teamId,
-      groupIds,
-      orgIds,
-      datasetPermission,
-      hasSetCollectionPermissions: datasetFlags.get(datasetId)
-    });
-    perDatasetReadable.forEach((id) => readableIds.add(id));
-  }
-
-  return expandReadableFoldersToFileIds({
-    allCollections: collections,
-    readableIds
-  });
+  const flags = new Map<string, boolean | undefined>(
+    datasets.map((ds) => [String(ds._id), ds.hasSetCollectionPermissions])
+  );
+  return datasetIds.every((id) => flags.get(id) === false);
 }
-
-/**
- * 团队 owner/admin 短路：Dataset read 门槛通过后，直接返回该 Dataset 下全部文件 Collection ID。
- * 只查询实际文件（type !== folder），folder 无需展开。
- */
-const resolveOwnerAdminFileCollectionIds = async ({
-  teamId,
-  datasetIds,
-  tmbId
-}: {
-  teamId: string;
-  datasetIds: string[];
-  tmbId: string;
-}): Promise<string[]> => {
-  const readableDatasetIds = new Set<string>();
-  for (const datasetId of datasetIds) {
-    try {
-      await authDatasetByTmbId({ tmbId, datasetId, per: ReadPermissionVal });
-      readableDatasetIds.add(datasetId);
-    } catch {
-      // 无 Dataset read → 排除该 Dataset
-    }
-  }
-  if (readableDatasetIds.size === 0) return [];
-
-  const collections = await MongoDatasetCollection.find(
-    {
-      teamId,
-      datasetId: { $in: Array.from(readableDatasetIds) },
-      type: { $ne: DatasetCollectionTypeEnum.folder }
-    },
-    '_id'
-  ).lean();
-
-  return collections.map((item) => String(item._id));
-};
-
-/**
- * 将可读集合（含 folder ID）展开为实际文件 Collection ID。
- *
- * `getReadableCollectionIds` 已对每个 Collection 单独判定可读性（继承态文件在可读 folder
- * 下即返回），因此这里把可读 folder 递归展开为其下可读文件，folder 本身不参与召回。
- * 非继承态私有文件即使位于可读 folder 下也不会被加入（readableIds 未包含）。
- */
-const expandReadableFoldersToFileIds = ({
-  allCollections,
-  readableIds
-}: {
-  allCollections: Array<{ _id: unknown; parentId?: unknown; type: string }>;
-  readableIds: Set<string>;
-}): string[] => {
-  const typeMap = new Map<string, string>();
-  const childrenMap = new Map<string, string[]>();
-  for (const item of allCollections) {
-    const id = String(item._id);
-    typeMap.set(id, item.type);
-    if (item.parentId) {
-      const parentId = String(item.parentId);
-      const list = childrenMap.get(parentId) ?? [];
-      list.push(id);
-      childrenMap.set(parentId, list);
-    }
-  }
-
-  const allowed = new Set<string>();
-  for (const id of readableIds) {
-    if (typeMap.get(id) !== DatasetCollectionTypeEnum.folder) {
-      allowed.add(id);
-      continue;
-    }
-
-    // 可读 folder → BFS 展开为其下可读文件 Collection ID
-    const queue = [id];
-    while (queue.length) {
-      const current = queue.shift()!;
-      for (const child of childrenMap.get(current) ?? []) {
-        if (typeMap.get(child) === DatasetCollectionTypeEnum.folder) {
-          queue.push(child);
-        } else if (readableIds.has(child)) {
-          allowed.add(child);
-        }
-      }
-    }
-  }
-
-  return Array.from(allowed);
-};

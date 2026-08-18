@@ -1,5 +1,5 @@
 import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
-import { resolveReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
 import { pushDatasetTestUsage } from '@/service/support/wallet/usage/push';
 import { deepRagSearch, defaultSearchDatasetData } from '@fastgpt/service/core/dataset/search';
 import { updateApiKeyUsage } from '@fastgpt/service/support/openapi/tools';

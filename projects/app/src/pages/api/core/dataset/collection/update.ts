@@ -134,8 +134,8 @@ async function handler(req: ApiRequestProps) {
     });
 
     if (isMove) {
-      // Move：inheritPermission 默认 true 时继承新父级 clbs 并同步继承态子 Folder 快照；
-      // 显式 false 时保持独立配置，仅更新 parentId。
+      // Move：inheritPermission 未传时保持原状态（collection.inheritPermission）；
+      // 显式 true 时继承新父级 clbs 并同步继承态子 Folder 快照；显式 false 时保持独立配置，仅更新 parentId。
       await moveCollectionPermission({
         collection: {
           _id: String(collection._id),
@@ -147,7 +147,7 @@ async function handler(req: ApiRequestProps) {
           inheritPermission: collection.inheritPermission
         },
         targetParentId: parentId,
-        inheritPermission: inheritPermission !== false,
+        inheritPermission: inheritPermission ?? collection.inheritPermission,
         session
       });
     }

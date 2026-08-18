@@ -1,12 +1,23 @@
 # 文件级权限管理系统需求规格说明
 
+### 统一权限语义（强制约束）
+
+### 关键可见性与搜索规则（强制验收）
+- **文件列表按权限过滤**：服务端在数据库查询/批量过滤阶段仅返回当前主体对 collection 解析为 read 及以上的文件；无权文件不得占用分页、总数、游标、排序、聚合或错误差异。
+- **文件夹权限穿透平铺**：祖先文件夹不可见时，仅当用户对目标知识库具有 read 及以上权限，才可将该知识库脱离隐藏路径平铺展示并直接访问；仅拥有知识库内某个文件权限时，不展示该知识库，也不单独展示该文件。平铺结果不得暴露完整隐藏路径。
+- **知识库权限门槛**：详情、列表、搜索、平铺和检索均先校验知识库 read；文件级 read 不能绕过知识库门槛。知识库无 read 时，知识库及其全部文件均隐藏。
+- **当前路径限定搜索**：搜索请求必须携带规范化当前路径/父资源谓词，仅查询当前路径及允许展示的子树；禁止先做全局搜索再截断。非法或无权路径返回统一空/无权结果。
+- 所有 dataset、dataset 文件夹、collection 文件夹和 collection 仅使用 `inheritPermission` 布尔字段，默认 `true`。`true` 沿父链解析权限；`false` 只使用资源自身显式配置和 owner 权限。
+- 不存在额外的权限字段、枚举或隐式传播开关。需要独立权限时，服务端将目标资源及未配置的子资源纳入显式非继承控制子集并置为 `inheritPermission=false`；已有显式配置的子资源保持自身权限。
+- 显式非继承控制子集必须在服务端计算、持久化并审计；父级后续变化不得放大该子集。
+- 文件列表、文件夹穿透平铺、当前路径搜索及 RAG 检索均必须先执行资源路径/知识库门槛，再执行文件级 read 过滤；只拥有文件权限而没有知识库 read 时，不展示知识库及其文件。
+
 > 生成时间: 2026-08-03
 > 分析维度: 功能细化 | 预期效果 | 依赖关系
-> 输入来源: `doc/requirement/fr-nfr-draft.md`（FR/NFR 草稿）、`doc/requirement/user-story.md`（US-1 ~ US-11）、wiki 页面 v11 记录
+> 输入来源: `doc/requirement/fr-nfr-draft.md`（FR/NFR 草稿）、`doc/requirement/user-story.md`（US-1 ~ US-14）、wiki 页面 v11 记录
 
 ## 文档说明
 
-本文档将每个功能需求细化为完整的行为规格说明，覆盖正常路径、异常路径（≥2 条）、边界情况，定义数据格式（字段、枚举、默认值）与接口规格（路径、方法、请求/响应结构、错误码），并明确继承/独立状态转换规则与 `permissionEffectScope`（allChildren/currentOnly）的传播语义，可作为系统设计和开发的输入。
 
 ---
 
@@ -16,7 +27,7 @@
 
 FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅到资源类型（dataset / app / evaluation / model 等），通过 `resource_permissions` 表管理。核心痛点是**权限粒度不足**：同一个知识库（dataset）下的不同文件（collection / 文档）无法区分「谁能看、谁能改、谁不能看」。
 
-本需求为 collection（文件 / 文件夹）建立独立于 dataset 的权限配置能力，并围绕继承 / 独立状态、权限生效范围、移动、恢复继承、冲突检测、所有权转移、存量升级等能力完善文件级权限管理。
+本需求为 collection（文件 / 文件夹）建立独立于 dataset 的权限配置能力，并围绕继承 / 独立状态、显式非继承子集控制、移动、恢复继承、冲突检测、所有权转移、存量升级等能力完善文件级权限管理。
 
 **检索联动（US-11 / FR-11）**：知识库检索（KB 检索 / RAG 检索 / OpenAPI 检索）的召回结果**按文件级（collection 级）权限过滤**——用户仅能召回其解析后具有 read 及以上权限的 collection 内容，无 read 权限的 collection 内容不得出现在任何召回结果中（含 folder 递归展开或 dataset 级权限绕过）；在扩展资源管理与权限配置能力的同时，检索链路的权限判定下沉到文件级。
 
@@ -32,23 +43,22 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 ### 1.3 核心痛点
 
 - **痛点1**: 同一 dataset 下不同文件无法区分访问权限
-  - 影响范围: 知识库管理员 / 团队所有成员
+  - 影响继承控制: 知识库管理员 / 团队所有成员
   - 严重程度: 高
-- **痛点2**: 文件夹权限传播不可控（无「仅当前生效」能力），子资源意外继承权限
-  - 影响范围: 知识库管理员
+- **痛点2**: 文件夹权限传播不可控，未显式配置的子资源可能意外继承权限
+  - 影响继承控制: 知识库管理员
   - 严重程度: 中
 - **痛点3**: move / 恢复继承等操作后权限残留、冲突、泄漏
-  - 影响范围: 知识库管理员 / 系统运维
+  - 影响继承控制: 知识库管理员 / 系统运维
   - 严重程度: 高（数据正确性）
 - **痛点4**: 存量数据在继承逻辑升级后语义不一致，需一键重算
-  - 影响范围: 系统管理员
+  - 影响继承控制: 系统管理员
   - 严重程度: 中
 
 ### 1.4 用户旅程
 
 1. 管理员在 dataset 下创建文件 collection → 默认继承父级权限（US-3）。
 2. 管理员对单个文件配置协作者（read/write/manage）→ 同 dataset 不同文件解析出不同权限（US-1 / US-7）。
-3. 管理员对文件夹配置权限时选择生效范围（allChildren / currentOnly）→ 子资源按范围继承或停止继承（US-2 / US-4）。
 4. 管理员移动文件/文件夹 → 选择「继承新父级权限」或「保持独立配置」（US-5）。
 5. 管理员恢复误配置资源的继承（US-6）。
 6. 管理员配置的子级权限与父级冲突 → 自动取消继承并保留独立配置（US-8）。
@@ -59,7 +69,7 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 ### 1.5 需求目标
 
 - **目标1**: 实现 collection 级权限数据模型与解析 - 成功标准: 同一 dataset 下不同 collection 可解析出不同权限位（FR-1 验收）
-- **目标2**: 实现生效范围传播控制 - 成功标准: allChildren/currentOnly 语义正确、状态转换原子（FR-3/FR-5 验收）
+- **目标2**: 通过 `inheritPermission` 与显式非继承子集实现权限传播控制 - 成功标准: 默认继承、非继承资源不受父级后续变更影响，已有独立配置保持不变
 - **目标3**: 权限写操作无残留、无冲突、无泄漏 - 成功标准: move/恢复继承/changeOwner 后自动校验脚本残留数 = 0（NFR-3）
 - **目标4**: 列表性能不退化 - 成功标准: 10,000 collection、P95 ≤ 800ms（NFR-1）
 - **目标5**: 检索按文件级权限过滤 - 成功标准: 越权召回为 0、漏召回为 0、全路径一致（searchTest / 对话 / OpenAPI 无旁路）（NFR-8）；全继承态存量与既有 dataset 级行为等价（NFR-4）
@@ -78,18 +88,20 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 |---------|---------|------|---------|------------|-------------|------------|------------|-------|-------|---------|
 | F001 | collection 级权限数据模型与继承解析 | 增量功能 | 后台功能 | fastgpt-service | - | 是 | 否 | P0 | 中 | - |
 | F002 | collection 协作者配置接口 | 全新功能 | 接口功能 | fastgpt-pro | - | 是 | 否 | P0 | 高 | F001 |
-| F003 | 权限生效范围 permissionEffectScope | 增量功能 | 全栈功能 | fastgpt-service + fastgpt-pro | PUT /api/core/dataset/update | 是 | 否 | P0 | 高 | F001,F002 |
-| F004 | 创建资源默认继承父级权限 | 增量功能 | 后台功能 | fastgpt-service | POST /api/core/dataset/collection/create | 是 | 否 | P0 | 中 | F001,F003 |
-| F005 | currentOnly 下子资源停止继承 | 增量功能 | 后台功能 | fastgpt-service | - | 是 | 否 | P0 | 高 | F003 |
-| F006 | 移动（move）时的权限处理 | 增量功能 | 接口功能 | fastgpt-app | PUT /api/core/dataset/update | 是 | 否 | P0 | 高 | F001,F003 |
-| F007 | 恢复继承 | 增量功能 | 接口功能 | fastgpt-app | POST /api/core/dataset/resumeInheritPermission | 是 | 否 | P1 | 中 | F001 |
+| F004 | 创建资源默认继承父级权限 | 增量功能 | 后台功能 | fastgpt-service | POST /api/core/dataset/collection/create | 是 | 否 | P0 | 中 | F001 |
+| F006 | 移动（move）时的权限处理 | 增量功能 | 接口功能 | fastgpt-app | PUT /api/core/dataset/collection/update | 是 | 否 | P0 | 高 | F001 |
+| F007 | 恢复继承 | 增量功能 | 接口功能 | fastgpt-app | POST /api/core/dataset/collection/resumeInheritPermission | 是 | 否 | P1 | 中 | F001 |
 | F008 | 权限冲突检测与自动取消继承 | 增量功能 | 后台功能 | fastgpt-global | - | 是 | 否 | P0 | 高 | F001,F002 |
-| F009 | 所有权转移 changeOwner | 增量功能 | 接口功能 | fastgpt-pro | POST /api/proApi/core/dataset/changeOwner | 是 | 否 | P1 | 高 | F001 |
+| F009 | 所有权转移 changeOwner | 增量功能 | 接口功能 | fastgpt-pro | POST /api/proApi/core/dataset/collection/changeOwner | 是 | 否 | P1 | 高 | F001 |
 | F010 | 存量权限一键升级 | 全新功能 | 接口功能 | fastgpt-pro | - | 是 | 是 | P1 | 高 | F001-F009 |
 | F011 | 统一权限校验逻辑 | 增量功能 | 后台功能 | fastgpt-service | - | 是 | 否 | P0 | 中 | F001 |
 | F012 | collection 增删改查权限门槛 | 增量功能 | 接口功能 | fastgpt-app | PUT /api/core/dataset/collection/update | 是 | 否 | P0 | 中 | F001,F011 |
 | F013 | 权限数据存储与同步一致性 | 增量功能 | 后台功能 | fastgpt-service | - | 是 | 否 | P0 | 高 | F001-F009 |
 | F014 | 知识库检索（RAG 召回）按文件级权限过滤 | 增量功能 | 后台功能 | fastgpt-service | POST /api/core/dataset/searchTest | 是 | 否 | P0 | 高 | F001,F011 |
+| F015 | 文件列表权限过滤 | 增量功能 | 接口功能 | fastgpt-app | GET /api/core/dataset/collection/list | 是 | 否 | P0 | 高 | F011,F012 |
+| F016 | 隐藏路径穿透平铺展示 | 全新功能 | 接口功能 | fastgpt-app | GET /api/core/dataset/collection/list | 是 | 否 | P0 | 高 | F011,F012 |
+| F017 | 知识库权限门槛 | 增量功能 | 后台功能 | fastgpt-service | - | 是 | 否 | P0 | 中 | F011 |
+| F018 | 当前路径限定搜索 | 全新功能 | 接口功能 | fastgpt-service | GET /api/core/dataset/list、GET /api/core/dataset/collection/list | 是 | 否 | P0 | 高 | F011,F017 |
 
 **说明**:
 - **类型**: 标注是"增量功能"还是"全新功能"（基于内部分析得出）
@@ -104,11 +116,12 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 |---------|--------|---------|---------|--------|---------|
 | F001 | FR-1 | US-1/US-7 | F008 | FR-8 | US-8 |
 | F002 | FR-2 | US-7 | F009 | FR-9 | US-9 |
-| F003 | FR-3 | US-2 | F010 | FR-10 | US-10 |
-| F004 | FR-4 | US-3 | F011 | FR-12 | - |
-| F005 | FR-5 | US-4 | F012 | FR-13 | - |
-| F006 | FR-6 | US-5 | F013 | FR-14 | - |
-| F007 | FR-7 | US-6 | F014 | FR-11 | US-11 |
+| F004 | FR-4 | US-3 | F010 | FR-10 | US-10 |
+| F006 | FR-6 | US-5 | F011 | FR-12 | - |
+| F007 | FR-7 | US-6 | F012 | FR-13 | - |
+| F014 | FR-11 | US-11 | F013 | FR-14 | - |
+| F015 | FR-15 | - | F016 | FR-16 | - |
+| F017 | FR-17 | - | F018 | FR-18 | - |
 
 | 非功能 | 草稿 NFR | 规格章节 | 非功能 | 草稿 NFR | 规格章节 |
 |--------|---------|---------|--------|---------|---------|
@@ -126,7 +139,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 > - **权限位**：read=`0b100`(4)、write=`0b010`(2)、manage=`0b001`(1)、owner=`~0>>>0`(4294967295)。角色值为累计位：write=`0b110`(6)（含 read）、manage=`0b111`(7)（含 write+read）。
 > - **协作者标识**：`tmbId` / `groupId` / `orgId` 三选一且唯一（`CollaboratorIdType = RequireOnlyOne`）。
 > - **权限校验顺序**（`getTmbPermission` 现有语义）：个人 tmbId 记录优先；若不存在，取 groupId 集合与 orgId 集合记录的 `sumPer`（按位 OR）最大值。
-> - **状态字段**：`inheritPermission`（布尔，`true`=继承父级 / `false`=独立态，默认 `true`）；`permissionEffectScope`（枚举 `allChildren` / `currentOnly`，默认 `allChildren`）。
 
 > **继承态数据不变量与解析语义（权威定义，全文档唯一口径，P-1 冻结）**：
 > - **落库（写路径）**：继承态非 folder 资源 clbs 仅含自身 owner 记录（≤1 条）；继承态 folder 资源 clbs = 父级 clbs 的「owner→manage 映射副本」+ 自身 owner 记录（**父级 owner 在子资源上以 manage 呈现**）。同步原语 `createResourceDefaultCollaborators` / `syncCollaborators` / `resumeInheritPermission` 均将父级 owner 映射为 manage；`syncChildrenPermission` 不下发 owner 位。
@@ -144,7 +156,7 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 **功能类型**: 全新功能
 **功能实现类型**: 接口功能
 **业务目标**: 为单个文件（collection）直接配置协作者（read/write/manage），实现文件级单独授权（US-7）。
-**技术目标**: 复用 dataset 版 `collaborator/update` 的语义与事务模式，支持 folder 全量下发、冲突自动取消继承（FR-8）、范围变更（FR-3）。
+**技术目标**: 复用 dataset 版 `collaborator/update` 的语义与事务模式，支持 folder 全量下发、冲突自动取消继承（FR-8）、继承状态变更（FR-3）。
 
 **参考功能**:
 - 可参考功能: dataset 协作者配置 `pro/admin/src/pages/api/core/dataset/collaborator/update.ts:43-122`（`handler`）
@@ -159,17 +171,14 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 | 输入项 | 类型 | 来源 | 必填 | 约束条件 | 示例 |
 |-------|------|------|------|---------|------|
 | collectionId | String(ObjectId) | 请求参数 | 是 | 必须存在且属于请求 team；否则 `unExistCollection` / `unAuthDataset` | "660b3f..." |
-| collaborators | Array | 请求参数 | 是 | 继承态资源必须非空（清空走 F007）；独立态资源允许空数组（清空非 owner clb，保持独立态，S-8）；仅范围变更请求可省略（F003）；每项 `tmbId`/`groupId`/`orgId` 三选一唯一；`permission` 必须为合法角色值之一 | [{tmbId:"u1",permission:6}] |
+| collaborators | Array | 请求参数 | 是 | 继承态资源必须非空（清空走 F007）；独立态资源允许空数组（清空非 owner clb，保持独立态，S-8）；仅继承状态变更请求可省略；每项 `tmbId`/`groupId`/`orgId` 三选一唯一；`permission` 必须为合法角色值之一 | [{tmbId:"u1",permission:6}] |
 | collaborators[].permission | Number | 请求参数 | 是 | 枚举: 4(read) / 2(write) / 6(write角色) / 1(manage) / 7(manage角色)；**不含 owner(4294967295)**——owner 记录由资源 tmbId 派生，不可经协作者接口授予/移除，仅创建默认与 changeOwner 可变更（S-3 已冻结）；非法值报参数错误 | 6 |
-| permissionEffectScope | String | 请求参数 | 否 | 枚举 `allChildren` / `currentOnly`，缺省 `allChildren`；**仅 folder 类型 collection 允许 `currentOnly`**（非 folder 传 `currentOnly` 返回参数错误，见 T-2） | "allChildren" |
 
 **输入校验规则**:
 1. `collectionId` 为空 → `CommonErrEnum.missingParams`。
 2. `collaborators` 为空数组：继承态资源 → `CommonErrEnum.missingParams`（清空请走恢复继承 F007）；独立态资源 → 合法清空操作（清空全部非 owner clb，保持独立态，仅保留自身 owner 记录，S-8 已冻结）。
 3. `collaborators` 项中 `tmbId`/`groupId`/`orgId` 多于一项或全缺 → `CommonErrEnum.invalidParams`。
 4. `permission` 不在合法角色值集合（4/2/6/1/7，**不含 owner**）→ `CommonErrEnum.invalidParams`。
-5. `permissionEffectScope` 非法枚举 → zod parse 错误（`CommonErrEnum.invalidParams`）。
-6. 非 folder collection 传 `permissionEffectScope=currentOnly` → 参数错误（T-2 默认方案）。
 
 ###### 输出定义
 
@@ -187,7 +196,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 | 错误码 | 错误信息(statusText) | 触发条件 | 处理建议 |
 |-------|---------|---------|---------|
 | 507004 | missingParams | collectionId 缺失 / 继承态下 collaborators 为空数组 | 补齐参数后重试 |
-| 507000 | invalidParams | 协作者标识不唯一 / permission 非法（含 owner）/ 非 folder 传 currentOnly | 修正入参 |
 | 501004 | unAuthDataset | 用户无 collection manage 及以上权限；或非 owner 提交含 manage 角色的配置 | 联系资源 owner / 需 owner 操作 |
 | 501011 | canNotEditAdminPermission | 配置列表中包含操作者自身（tmbId 等于当前操作者） | 移除自身条目 |
 | 501003 | unExistCollection | collectionId 不存在 | 确认 collectionId |
@@ -202,7 +210,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 **触发条件**: 用户在前端为某 collection 保存协作者配置。
 
 **步骤**:
-1. 用户提交全量 clbs 列表（含目标 `permissionEffectScope`）。
 2. 系统校验 `collectionId` 存在且团队归属一致。
 3. 系统调用 `authDatasetCollection({ collectionId, per: ManagePermissionVal })` 鉴权（collection 维度，permission 解析走统一校验 F011）。
 4. 系统校验入参（自身不可改、非 owner 不可含 manage 角色）。
@@ -245,27 +252,19 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 
 ---
 
-##### 功能F003: 权限生效范围 permissionEffectScope (增量功能)
 
 ###### 功能描述
 
 **功能类型**: 增量功能
 **功能实现类型**: 全栈功能（字段扩展 + 接口入参 + 后台传播逻辑）
-**业务目标**: 让管理员在给文件夹（folder 类型 collection / dataset）配置权限时控制传播范围：`allChildren`（默认，下发给所有子资源）或 `currentOnly`（仅当前资源生效，子资源不继承）（US-2）。
-**技术目标**: 新增 `permissionEffectScope` 字段；将其写入与 clbs 配置在同一次请求内原子完成（FR-3/FR-5）；非 folder 资源不产生传播效果。
 
 **【如果是增量功能】相关现有功能**:
 - 现有接口: `PUT /api/core/dataset/update` - 代码位置: `projects/app/src/pages/api/core/dataset/update.ts:55-137`（dataset 更新，含 move）
 - 现有数据模型: `datasets`（`MongoDataset`） - 代码位置: `packages/service/core/dataset/schema.ts:128-131`（已有 `inheritPermission`）
-- 增量方向: `datasets`/`dataset_collections` 新增 `permissionEffectScope` 字段；`collaborator/update` 类接口入参扩展该字段；后台新增范围变更传播逻辑（F005）。
-- 兼容性注意: 存量文档无该字段，读取时缺省视为 `allChildren`；升级接口（F010）负责补写/重算存量。
 
-**输入定义（范围变更请求）**:
-- 范围变更并入 `collaborator/update` 请求（T-2 默认方案：folder 允许「仅变更范围」独立请求，即传 `permissionEffectScope` 且 `collaborators` 可省略；非 folder 传 `currentOnly` 报参数错误）。
-- `permissionEffectScope` 仅接受 `allChildren` / `currentOnly`，其他值返回参数校验错误。
+**输入定义（继承状态变更请求）**:
 
 **输出定义（增量接口变更）**:
-- `collaborator/update` 与 `getPermission`/`detail` 响应：新增返回 `permissionEffectScope` 字段（资源详情可见当前范围）。
 - 无其他输出变更。
 
 ###### 正常路径
@@ -275,44 +274,29 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 - 用户状态: 持有目标资源 `manage` 及以上权限。
 - 数据状态: 资源存在。
 
-**触发条件**: 管理员在配置权限时选择生效范围并保存。
+**触发条件**: 管理员在配置权限时选择继承控制并保存。
 
 **步骤**:
-1. 用户提交 `permissionEffectScope`（与全量 clbs 同请求，或仅范围变更）。
 2. 系统鉴权 `manage` 及以上。
-3. 系统校验资源类型与枚举值合法（非 folder 传 `currentOnly` 报错）。
-4. 系统若收到 `allChildren`，与 clbs 配置同事务落库：直接写新范围字段。
-5. 系统若收到 `currentOnly`，执行 F005 传播逻辑：将范围内所有继承态子资源置 `inheritPermission=false`（避免子资源意外获得权限，US-4）。
-6. 系统在 mongo session 内原子完成范围字段写入 + 传播写 + clbs 配置。
+6. 系统在 mongo session 内原子完成继承状态字段写入 + 传播写 + clbs 配置。
 7. 系统写审计日志。
 
 **后置条件**：
-- 系统状态: 资源 `permissionEffectScope` 已更新。
-- 数据状态: `currentOnly` 时子树内继承态子资源已转独立态。
-- 用户反馈: 成功返回；子资源权限行为按新范围生效。
+- 用户反馈: 成功返回；服务端已记录资源自身的继承状态，权限解析按该状态和显式配置计算。
 
 **成功标准**：
-- [ ] 新建资源详情查询 `permissionEffectScope` 默认 `allChildren`。
-- [ ] folder 为 `allChildren` 时配置权限 P，继承态子资源解析到 P。
-- [ ] folder 为 `currentOnly` 时配置权限 P，仅 folder 本身解析到 P，子资源解析结果与配置前一致（除非自身有独立配置）。
-- [ ] 非 folder 资源设置 `currentOnly` 不产生传播效果。
 
 ###### 异常路径
 
-**EP-1（非法枚举）**: 传入 `permissionEffectScope` 非 `allChildren`/`currentOnly` → 参数校验错误，无任何写入。
-**EP-2（非 folder 传 currentOnly）**: 普通文件 collection / 普通 dataset 传 `currentOnly` → 返回参数错误（T-2 默认方案）。
-**EP-3（越权）**: 无 `manage` 权限用户修改范围 → 返回 `unAuthDataset`，数据不变。
-**EP-4（传播中途失败）**: `allChildren→currentOnly` 过程中某子资源更新失败 → 事务回滚，资源与子资源保持变更前状态。
+**EP-3（越权）**: 无 `manage` 权限用户修改继承控制 → 返回 `unAuthDataset`，数据不变。
 
 ###### 边界条件处理
 
 | 边界条件 | 处理方式 |
 |---------|---------|
-| 存量文档无 `permissionEffectScope` 字段 | 读取时缺省视为 `allChildren`（兼容旧数据） |
-| 范围变更请求未携带 clbs（仅变更范围） | folder 允许（T-2 默认方案）；独立范围变更不改动任何 clbs |
-| 范围变更与 clbs 配置同请求 | 在同一 mongo session 内原子完成（FR-5） |
-| `currentOnly` 子资源已有独立配置 | 不覆盖其独立 clbs，仅置 `inheritPermission=false` |
-| dataset 类型为 website/api 等非 folder | 允许设置范围字段，但不产生子资源传播（无 folder 子树） |
+| 继承状态变更请求未携带 clbs（仅变更继承控制） | folder 允许（T-2 默认方案）；独立继承状态变更不改动任何 clbs |
+| 继承状态变更与 clbs 配置同请求 | 在同一 mongo session 内原子完成（FR-5） |
+| dataset 类型为 website/api 等非 folder | 允许设置继承状态字段，但不产生子资源传播（无 folder 子树） |
 | 子树节点 10 层 dataset + 10 层 collection | 传播采用 BFS + 去重，受 NFR-2 阈值约束 |
 
 ---
@@ -382,7 +366,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 **成功标准**：
 - [ ] 继承新父级后，R 的 clbs = dest 的 clbs（owner 位映射为 manage）+ 自身 owner 记录；源目录特有 clb 在 R 及子树上残留数为 0（逐条比对）。
 - [ ] 保持独立配置时，R 及子资源 clbs 保持不变，`inheritPermission=false`。
-- [ ] 目标父级为 `currentOnly`（N3）：默认「继承新父级」时 R 置 `inheritPermission=false`、clbs 仅自身 owner 记录，R 及继承态子树均不获得 dest 权限，源目录特有 clb 残留数为 0；显式「保持独立」时 R 独立 clbs 原样保留，源目录特有 clb 残留数为 0。
 
 ###### 异常路径
 
@@ -397,7 +380,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 |---------|---------|
 | 移动到根目录（parentId=null） | dest clbs 为空集；R 自身 clbs 仅保留 owner，`inheritPermission=true` |
 | 从根目录移入文件夹 | 需团队创建权限；执行新父级同步 |
-| 目标父级为 `currentOnly`（N3 冻结） | 不阻止 move；但**不执行正常路径 4b 的「同步 dest clbs」**。结果状态按 US-5 双策略区分：<br>(a) 默认「继承新父级」（inheritPermission=true）：currentOnly 父级不传播权限，R 置 `inheritPermission=false`，clbs **重置为仅自身 owner 记录**（不携带 dest clbs、不保留源目录 clbs，源权限零残留）；R 的继承态子树随 R 独立化，**子资源不因 move 获得新父级权限**（US-4/US-5）。<br>(b) 显式「保持独立配置」（inheritPermission=false）：R 保留自身独立 clbs 不变，仅置 `inheritPermission=false`（用户显式配置不被覆盖）。<br>两种策略下源目录特有旧 clb 在 R 及子树上残留数均为 0。 |
 | 同一请求重复提交相同 move | 幂等：第二次执行同步结果一致，产生 0 净变更 |
 | 移动的子树含冲突态非继承 folder | 仅同步继承态子资源；冲突态非继承子 folder 保留独立配置，不被覆盖 |
 | dataset move 且该 dataset 下存在 folder collection | 这些 folder collection 同步为新 dataset 父级权限（FR-6 第 5 条） |
@@ -490,7 +472,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 |---------|---------|
 | 资源已是继承态且 clbs 干净 | 幂等：调用后无净变更 |
 | 根级资源（无父级） | 仅置 `inheritPermission=true`，不写其他 |
-| 父级为 `currentOnly` 范围 | 恢复继承后该资源解析为自身 owner 权限（父级 currentOnly 不传播），不自动扩权（T-5） |
 | 非 folder 资源含历史脏 clb | 恢复时全量清除（仅 owner 保留） |
 | 子 folder 1000+ | BFS + `bulkWrite`，受 NFR-2 阈值约束 |
 | 恢复后父级恰好无任何 clbs | 资源仅保留 owner clb，解析结果只有 owner |
@@ -608,7 +589,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 **功能类型**: 全新功能
 **功能实现类型**: 接口功能
 **业务目标**: 系统管理员在权限继承逻辑升级后，从根开始按新逻辑重新配置所有权限，使存量数据自动迁移到新规则（US-10）。
-**技术目标**: 从根节点（无 `parentId` 的 dataset）出发，按新继承语义（permissionEffectScope / 冲突取消继承 / folder 全量 clb / 非 folder 继承态仅 owner）递归重算并落库；**升级遍历范围（R2 显式声明）= 全部 dataset（含 folder dataset 子树）+ 其下全部 collection（含 folder collection 子树，F011 子资源定义）**，与成功标准「全部资源满足不变量」的执行范围一致；单根失败不阻断其余根；可重入。
 
 **参考功能**:
 - 可参考功能: `resumeInheritPermission` + `syncChildrenPermission` - 代码位置: `packages/service/support/permission/inheritPermission.ts:204-287,32-198`
@@ -677,7 +657,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
    - 非 folder 继承态 → 清除除 owner 外 clbs，置 `inheritPermission=true`；
    - folder 继承态 → clbs = 父级 clbs（owner→manage 映射）+ 自身 owner 记录；
    - 冲突资源（子级与父级冲突）→ 置非继承态并保留独立配置；
-   - 补写 `permissionEffectScope` 缺省 `allChildren`。
 5. 系统逐根记录进度日志；单根失败不阻断其余根。
 6. 系统汇总返回（成功根数、失败根列表）。
 
@@ -887,7 +866,6 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 
 **【如果是增量功能】相关现有功能**:
 - 现有数据模型: `dataset_collections`（`MongoDatasetCollection`） - 代码位置: `packages/service/core/dataset/collection/schema.ts:13-87`（当前**无** `inheritPermission`）
-- 现有数据模型: `datasets`（`MongoDataset`） - 代码位置: `packages/service/core/dataset/schema.ts:128-131`（已有 `inheritPermission`，缺 `permissionEffectScope`）
 - 现有数据模型: `resource_permissions`（`MongoResourcePermission`） - 代码位置: `packages/service/support/permission/schema.ts:14-59`（`resourceType` 枚举 `PerResourceTypeEnum` 不含 `collection`，见 `packages/global/support/permission/constant.ts:48-54`）
 - 增量方向: 字段新增 + 枚举扩展 + 解析逻辑。
 
@@ -896,9 +874,7 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 | 集合 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | dataset_collections | inheritPermission | Boolean | true | 新增；true=继承父级，false=独立态 |
-| dataset_collections | permissionEffectScope | String | "allChildren" | 新增；枚举 `allChildren`/`currentOnly`，仅 folder 可配 currentOnly |
 | dataset_collections | permissionVersion | Number | 1 | **新增**（现有 schema 无此字段，N4 冻结）；乐观并发控制版本号 CAS（S-4 选型落地） |
-| datasets | permissionEffectScope | String | "allChildren" | 新增；同左 |
 | datasets | permissionVersion | Number | 1 | **新增**（现有 schema 无此字段，N4 冻结）；乐观并发控制版本号 CAS（S-4 选型落地） |
 | resource_permissions | resourceType | String | - | 枚举扩展：新增 `collection`（T-1 默认方案） |
 
@@ -934,19 +910,14 @@ resolvePermission(resourceId, resourceType, tmbId):
 |---------|---------|---------|---------|
 | 继承态（inheritPermission=true） | 配置与父级冲突（F008） | 独立态 | 置 false；folder 全量下发 clbs 到继承态子 folder |
 | 继承态 | 配置与父级无冲突 | 保持继承态 | 仅增量更新自身 clbs |
-| 继承态 | 父级范围改 currentOnly（F005） | 独立态 | 置 false（未配置独立权限的子资源转为独立态） |
 | 独立态 | 恢复继承（F007） | 继承态 | 同步父级 clbs / 清空自身非 owner clb |
 | 任意 | move 选择继承新父级（F006） | 继承态 | 同步新父级 clbs，源权限零残留 |
 | 任意 | changeOwner（F009） | 独立态（本资源） | 置 false；子资源仅改 owner |
 
-**`permissionEffectScope` 传播语义**:
 
-| 范围 | 配置权限 P 于 folder F 时 | 创建子资源时 | 范围切换时 |
+| 继承控制 | 配置权限 P 于 folder F 时 | 创建子资源时 | 继承控制切换时 |
 |------|--------------------------|--------------|-----------|
-| allChildren（默认） | 继承态子资源解析到 P | 新资源 `inheritPermission=true`（自动继承） | → currentOnly: 所有继承态子资源置 false（F005） |
-| currentOnly | 仅 F 本身解析到 P；子资源不因 F 获得权限 | 新资源 `inheritPermission=false`（独立态） | → allChildren: 仅切换范围，不自动改子资源继承态 |
 
-**补充约束（T-5 默认不自动扩权）**：父集无权限时，**不**为子资源自动补父级 `currentOnly` 读权限；子资源保持自身解析结果，避免权限扩散。
 
 ###### 边界条件处理
 
@@ -969,52 +940,38 @@ resolvePermission(resourceId, resourceType, tmbId):
 
 **功能类型**: 增量功能
 **功能实现类型**: 后台功能
-**业务目标**: 创建 collection / dataset 时自动按父级生效范围决定继承/独立状态，folder 创建时正确合并父级 owner 降级（US-3）。
+**业务目标**: 创建 collection / dataset 时自动按父级继承控制决定继承/独立状态，folder 创建时正确合并父级 owner 降级（US-3）。
 **技术目标**: 在 `createOneCollection` / dataset 创建流程中执行「关联创建」权限初始化，与资源创建同一事务。
 
 **【如果是增量功能】相关现有功能**:
 - 现有后台: `createOneCollection` - 代码位置: `packages/service/core/dataset/collection/controller.ts:276-315`（当前只建资源，不写权限）
 - 现有后台: `createResourceDefaultCollaborators` - 代码位置: `packages/service/support/permission/controller.ts:181-240`（dataset 创建时写权限：**全量拷贝父级 clbs，父级 owner 降级为 manage，追加自身 owner 记录**——R1 对齐实际实现，避免实现方误读为「仅 owner 拷贝」而破坏不变量 #2）
-- 增量方向: collection 创建时复用 `createResourceDefaultCollaborators`；按父级 `permissionEffectScope` 决定 `inheritPermission`。
 
 **逻辑规则**:
-1. 读取父集（collection 创建取 `parentId`，无则 `datasetId`）的 `permissionEffectScope`（缺省 allChildren）。
-2. `allChildren` → 新资源 `inheritPermission=true`（自动继承，无需重复配置）。
-3. `currentOnly` → 新资源 `inheritPermission=false`（独立态）。
-4. 创建 folder 时的 clbs 携带，按父级范围分两类（规则 4 与规则 3 衔接口径，N1 冻结）：
-   - **父级为 allChildren（继承态）**：全量拷贝父集 clbs（父集 owner 降级为 manage），与自身 owner 记录合并做全量配置（`createResourceDefaultCollaborators` 语义，全量拷贝口径见 R1）；
-   - **父级为 currentOnly（独立态）**：仅落自身 owner 记录（clbs = 自身 owner，≤1 条），**不携带父集任何 clbs**。若此时仍按「全量拷贝父集 clbs」执行，新 folder（默认 `allChildren`）的后续子资源将经继承链获得父集权限，违背 US-4 / F005「子资源不因创建而获得父级权限」——该权限泄漏路径必须封死。
+4. 创建 folder 时的 clbs 携带，按父级继承控制分两类（规则 4 与规则 3 衔接口径，N1 冻结）：
 
 ###### 边界条件处理
 
 | 边界条件 | 处理方式 |
 |---------|---------|
-| 父目录 allChildren 且已有权限 P | 新子文件 inheritPermission=true，权限解析等于父目录 |
-| 父目录 currentOnly | 新子文件（含 folder）inheritPermission=false，不继承父目录权限 |
-| 父目录 currentOnly + 新建 folder（N1 反例） | 新 folder 独立态，clbs 仅自身 owner 记录、不携带父集 clbs；其后续子资源经自身继承链至多解析到 owner，不因创建获得父集权限（泄漏路径已封死） |
 | 用户对父目录仅 write | create collection 鉴权通过（parent write 或 dataset write） |
 | 用户对父目录无 write | 返回 unAuthDataset，不产生资源与权限记录 |
 | 创建与权限初始化事务 | 同一 mongo session；失败回滚，不残留无主资源或无主权限记录 |
 | 防重名/重复提交 | 创建接口防重名/重复提交产生的孤儿权限（事务内创建资源+写权限） |
-| folder 创建（父级 allChildren） | 全量配置 = 父级 clbs（owner 降 manage）+ 自身 owner（`createResourceDefaultCollaborators` 全量拷贝语义，R1） |
 
 ---
 
-##### 功能F005: currentOnly 下子资源停止继承 (增量功能)
 
 ###### 功能描述
 
 **功能类型**: 增量功能
 **功能实现类型**: 后台功能
-**业务目标**: 文件夹 F 范围从 allChildren 变为 currentOnly 时，所有子资源停止继承、转为独立态，避免子资源意外获得权限（US-4）。
-**技术目标**: 范围变更时 BFS 遍历子资源，将 `inheritPermission` 统一置 false；与范围写入同事务。
+**技术目标**: 继承状态变更时 BFS 遍历子资源，将 `inheritPermission` 统一置 false；与继承控制写入同事务。
 
 **【如果是增量功能】相关现有功能**:
 - 现有后台: `syncChildrenPermission` - 代码位置: `packages/service/support/permission/inheritPermission.ts:32-198`（BFS + bulkWrite 模式可复用/反用）
 
 **逻辑规则**:
-1. 范围 `allChildren → currentOnly`：遍历 `inheritPermission=true` 的子资源（BFS），逐个置 `inheritPermission=false`。
-2. 未设置独立权限的子资源转为独立态后，其解析结果 = 自身 clbs（仅 owner，若父级 currentOnly 不传播），不因 F 的配置获得权限。
 3. 已设置独立配置的子资源保持其独立 clbs 不变，仅状态翻转。
 4. 变更与 F 自身权限配置在同一次请求内原子生效（事务）。
 
@@ -1154,7 +1111,6 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 ### FP-1: collection schema 字段扩展与 resourceType 枚举扩展
 **类型**: CRUD（schema）
 **复杂度**: 简单
-**描述**: `dataset_collections` 增 `inheritPermission`/`permissionEffectScope`；`datasets` 增 `permissionEffectScope`；`resource_permissions.resourceType` 增 `collection` 枚举；索引与旧数据兼容。
 **验收测试**: schema 单测、枚举校验、存量数据读取
 **预计工作量**: 8 小时
 
@@ -1165,18 +1121,15 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 **验收测试**: 正/负向解析单测（继承链、group 叠加、无权限拒绝）；批量可读解析正确性（100 可读/900 不可读恰返回 100）与常数 DB 查询次数
 **预计工作量**: 32 小时
 
-### FP-3: collection 协作者配置接口（F002/F003/F008）
+### FP-3: collection 协作者配置接口（F002/F008）
 **类型**: 集成
 **复杂度**: 复杂
-**描述**: `/api/proApi/core/dataset/collection/collaborator/update`；全量 clbs 下发 + 范围变更 + 冲突取消继承 + folder 下发；事务与审计。
+**描述**: `/api/proApi/core/dataset/collection/collaborator/update`；全量 clbs 下发 + 继承状态变更 + 冲突取消继承 + folder 下发；事务与审计。
 **验收测试**: 配置、越权、自身保护、冲突取消继承、folder 同步、事务回滚
 **预计工作量**: 40 小时
 
-### FP-4: 创建默认继承与 currentOnly 停止继承（F004/F005）
+### FP-4: 创建资源默认继承与显式非继承子集（F004）
 **类型**: 处理
-**复杂度**: 中等
-**描述**: 创建时按父级范围初始化继承态；范围切换时 BFS 置子资源独立态。
-**验收测试**: allChildren/currentOnly 创建、范围切换传播、事务回滚
 **预计工作量**: 16 小时
 
 ### FP-5: 移动权限处理（F006）
@@ -1221,7 +1174,20 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 **验收测试**: 越权召回=0、漏召回=0、folder 展开不可绕过、三入口一致、存量等价回归、端到端 P95 退化 ≤15%
 **预计工作量**: 32 小时
 
-### 汇总
+### FP-11: 隐藏路径穿透平铺与知识库门槛（F016/F017）
+**类型**: 查询
+**复杂度**: 复杂
+**描述**: 对隐藏祖先路径执行知识库 read 门槛校验，仅允许知识库级可读主体平铺展示；仅文件授权不泄露知识库或文件。
+**验收测试**: 隐藏路径平铺、无知识库权限、仅文件权限、路径泄露和分页一致性
+**预计工作量**: 24 小时
+
+### FP-12: 当前路径限定搜索（F018）
+**类型**: 查询
+**复杂度**: 复杂
+**描述**: 服务端以规范化当前路径/父资源谓词直接约束查询范围，并叠加知识库和 collection read 过滤，禁止全局搜索后截断。
+**验收测试**: 当前路径、空路径、无权路径、非法路径、分页排序和性能
+**预计工作量**: 24 小时
+
 
 | 功能点 | 类型 | 复杂度 | 工作量 |
 |--------|------|--------|--------|
@@ -1235,7 +1201,9 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | FP-8: 存量一键升级 | 集成 | 复杂 | 32 小时 |
 | FP-9: CRUD 门槛与列表过滤 | 查询 | 中等 | 24 小时 |
 | FP-10: 检索文件级过滤 | 处理 | 复杂 | 32 小时 |
-| **总计** | | | **248 小时** |
+| FP-11: 隐藏路径平铺与知识库门槛 | 查询 | 复杂 | 24 小时 |
+| FP-12: 当前路径限定搜索 | 查询 | 复杂 | 24 小时 |
+| **总计** | | | **296 小时** |
 
 ### 2.4 场景覆盖矩阵
 
@@ -1243,9 +1211,7 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 |------|---------|-----------|---------|----------|
 | F001 | ✅ | 2 | 8 | 后台 |
 | F002 | ✅ | 5 | 8 | 接口 |
-| F003 | ✅ | 4 | 6 | 全栈 |
 | F004 | ✅ | 2 | 8 | 后台 |
-| F005 | ✅ | 2 | 5 | 后台 |
 | F006 | ✅ | 4 | 7 | 接口 |
 | F007 | ✅ | 4 | 6 | 接口 |
 | F008 | ✅ | 2 | 7 | 后台 |
@@ -1255,6 +1221,10 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | F012 | ✅ | 5 | 7 | 接口 |
 | F013 | ✅ | 2 | 5 | 后台 |
 | F014 | ✅ | 4 | 9 | 后台 |
+| F015 | ✅ | 4 | 7 | 接口 |
+| F016 | ✅ | 4 | 7 | 接口 |
+| F017 | ✅ | 3 | 5 | 后台 |
+| F018 | ✅ | 4 | 6 | 接口 |
 
 ---
 
@@ -1268,8 +1238,6 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 
 | 表名 | 数据库 | Schema | 修改内容 | 修改目的 |
 | ---- | ------ | ------ | -------- | -------- |
-| `dataset_collections` | MongoDB | `packages/service/core/dataset/collection/schema.ts` | 新增 `inheritPermission`(Boolean,默认true)、`permissionEffectScope`(String,默认"allChildren")、`permissionVersion`(Number,默认1，**新增字段**——现有 schema 无此字段，N4) | 支持 collection 级继承态、生效范围与乐观并发控制（CAS，S-4 选型） |
-| `datasets` | MongoDB | `packages/service/core/dataset/schema.ts` | 新增 `permissionEffectScope`(String,默认"allChildren")、`permissionVersion`(Number,默认1，**新增字段**——现有 schema 无此字段，N4) | 支持 dataset 生效范围与乐观并发控制（CAS，S-4 选型） |
 | `resource_permissions` | MongoDB | `packages/service/support/permission/schema.ts` | `resourceType` 枚举扩展新增 `collection`（`PerResourceTypeEnum` 扩展） | 支持 collection 维度 clbs 存储（T-1 默认方案） |
 
 **需要新增的表**:
@@ -1284,8 +1252,7 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 - 检索过滤为纯读：可读集合解析不落库（仅查询时合成），无新增表；复用读从库 `readFromSecondary`（NFR-7）。
 
 **存量数据兼容性**:
-- 新字段（`inheritPermission`、`permissionEffectScope`、`permissionVersion`）对旧文档可缺省：读取时缺省分别视为 `true`、`allChildren` 与 `1`（存量文档首次写权限前视为 version=1，写入时初始化）。
-- `permissionVersion` CAS 比对时机（N4 冻结）：所有权限写路径（collaborator update / 范围变更 / move / 恢复继承 / changeOwner / F010 升级）在写入前读取目标资源 `permissionVersion`，写入时以该 version 为过滤条件做**读-比较-写（CAS）**，成功则 version+1；版本不一致返回 `inheritPermissionError`(507005) 并提示重试（R004 缓解落地，S-4 选型）。
+- `permissionVersion` CAS 比对时机（N4 冻结）：所有权限写路径（collaborator update / 继承状态变更 / move / 恢复继承 / changeOwner / F010 升级）在写入前读取目标资源 `permissionVersion`，写入时以该 version 为过滤条件做**读-比较-写（CAS）**，成功则 version+1；版本不一致返回 `inheritPermissionError`(507005) 并提示重试（R004 缓解落地，S-4 选型）。
 - `resourceType` 新增枚举值采用增量扩展，旧数据可读（NFR-4）。
 - 存量脏数据（move 残留、继承态非 folder 含 clb）由 F010 升级接口迁移。
 
@@ -1295,7 +1262,7 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 
 | 配置文件路径 | 修改内容 | 修改目的 |
 | ------------ | -------- | -------- |
-| `pro` 前端（collection 协作设置弹窗） | 新增生效范围选择器、恢复继承、转移所有权入口 | 提供文件级权限配置 UI |
+| `pro` 前端（collection 协作设置弹窗） | 新增继承控制选择器、恢复继承、转移所有权入口 | 提供文件级权限配置 UI |
 
 **如果不涉及修改**: 本需求不涉及后端服务配置文件变更（无新增环境变量；升级接口鉴权级别见 T-3，已冻结）。
 
@@ -1322,7 +1289,6 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | 列表响应时间 | `listV2` 在 10,000 collection、用户命中 2,000 条、pageSize=100 下 P95 ≤ 800ms；与改造前基线退化 ≤ 20% | 压测脚本统计 |
 | N+1 规避 | 权限计算单请求内 clbs 批量加载（`$in`），per-collection 内存解析；禁止逐 collection 发起 DB 查询 | 代码审查 + 慢查询监控 |
 | 批量传播 | 同步/取消继承/恢复继承使用 `bulkWrite` 批量写入，禁止逐条 await；单层子节点 ≥ 1,000 仍可完成 | 压测 + 日志统计 |
-| 子树写耗时 | 测试拓扑（W-3 已冻结）：单根深树，路径长度 20（10 层 dataset folder 链 + 10 层 collection folder 链），每层 10 个兄弟节点、节点总量约 200；对根配置一次 allChildren 权限 P95 ≤ 5s | 压测脚本 |
 | 同步超时 | `syncChildrenPermission` / `resumeInheritPermission` 超时阈值 30s，超时任务失败回滚并记日志 | 监控告警 |
 | 并发列表 | `listV2` 100 并发请求下 CPU 单核可接受，不触发超时（读从库 `readFromSecondary` 沿用） | 压力测试 |
 | 递归去重 | 同步过程对同节点不重复遍历（visited 去重），避免环导致死循环 | 代码审查 + 环测试 |
@@ -1337,7 +1303,7 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | 鉴权门槛 | 权限写接口（collaborator update、changeOwner、resumeInheritPermission、升级）100% 校验 manage/owner 门槛；read 用户负向用例全部返回 `unAuthDataset` |
 | 信息不泄露 | 越权响应仅返回通用错误码（`unAuthDataset`），不包含资源名、其他用户信息、权限明细 |
 | 自身保护 | 操作者不得通过配置接口移除/修改自身权限以提权或锁死（`canNotEditAdminPermission`） |
-| 审计 | 关键写操作（配置、范围变更、move、恢复继承、changeOwner）写审计日志（`AuditEventEnum` 扩展），含操作者 tmbId、资源、变更前后权限摘要 |
+| 审计 | 关键写操作（配置、继承状态变更、move、恢复继承、changeOwner）写审计日志（`AuditEventEnum` 扩展），含操作者 tmbId、资源、变更前后权限摘要 |
 | 传输/数据加密 | 沿用现有 HTTPS 与数据加密基线，无新增 |
 | 检索静默过滤（NFR-8） | 无 read 权限 collection 内容在召回结果中不出现且不报错、不泄露「存在但无权」信息；越权负向用例下「无权限用户可召回」数为 0 |
 
@@ -1345,7 +1311,7 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 
 | 可靠性指标 | 目标 |
 |-----------|------|
-| 事务一致性 | 所有写路径（配置/范围变更/move/恢复继承/changeOwner/升级）100% 使用 mongo session 事务；异常回滚（注入中途失败，数据与操作前一致） |
+| 事务一致性 | 所有写路径（配置/继承状态变更/move/恢复继承/changeOwner/升级）100% 使用 mongo session 事务；异常回滚（注入中途失败，数据与操作前一致） |
 | 幂等 | 重复执行同一配置/move/恢复继承请求结果幂等（第二次产生 0 变更） |
 | 无残留 | move（继承新父级）后源目录特有 clb 残留数 = 0；恢复继承后非 owner clb 残留数 = 0（自动化校验脚本逐条比对） |
 | 无泄漏 | 任意用户组合下「无权限用户可读/可写/可管理」的越权访问数 = 0（渗透/负向用例全通过） |
@@ -1375,7 +1341,6 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 
 - **水平扩展**: 读多写少的权限解析可缓存/聚合（`listV2` 批量加载），无状态扩展不受限。
 - **模块化**: collection 资源类型枚举增量扩展；统一校验抽象供 app/skill 等复用。
-- **配置化**: `permissionEffectScope` 适用对象（dataset 所有 / collection 仅 folder）与冲突规则以常量/配置形式维护。
 - **接口版本化（S-6 补充）**: 新增接口沿用现有 `/api/core` 与 `/api/proApi` 前缀体系；本次新增均为新端点或既有请求/响应**新增字段**（不改变既有字段语义），向后兼容；对既有 `authDatasetCollection`「透传 dataset 权限 → collection 维度解析」的行为变化，通过版本化发布 + 回归用例集控制。
 
 ---
@@ -1387,10 +1352,10 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | 风险ID | 风险描述 | 影响功能 | 概率 | 影响 | 应对策略 |
 |-------|---------|---------|------|------|---------|
 | R001 | `resourceType` 新增 `collection` 枚举对全链路（含 proApi、admin、检索）影响面未完全评估（T-1） | F001,F002,F011,F012 | 中 | 高 | 设计阶段先行枚举扩展影响扫描；全链路回归 |
-| R002 | 草稿 FR-2「非继承态子 folder 同步」表述与继承态不变量冲突（T-6） | F002,F005,F008,F013 | 低 | 高 | **已冻结**：下发目标 = 仅 `inheritPermission=true` 子 folder（以 `syncChildrenPermission` 现有语义为准）；已删除草稿冲突措辞并补「非继承子 folder 不被覆盖」反例验收（W-1） |
+| R002 | 草稿 FR-2「非继承态子 folder 同步」表述与继承态不变量冲突（T-6） | F002,F008,F013 | 低 | 高 | **已冻结**：下发目标 = 仅 `inheritPermission=true` 子 folder（以 `syncChildrenPermission` 现有语义为准）；已删除草稿冲突措辞并补「非继承子 folder 不被覆盖」反例验收（W-1） |
 | R003 | 继承/独立状态转换矩阵复杂，事务遗漏导致脏数据 | F001-F009,F013 | 中 | 高 | 全写路径统一 `mongoSessionRun` + 不变量完整性扫描（FR-14） |
 | R004 | 升级接口与用户并发配置互相覆盖 | F010 | 中 | 中 | 幂等键必填 + 乐观并发控制（`permissionVersion` CAS）+ 低峰执行；单次 >30s 转异步任务并对同一资源路径写串行化（W-2） |
-| R005 | 深树传播超时/死循环 | F005,F006,F007 | 中 | 中 | BFS + visited 去重 + 30s 超时回滚 |
+| R005 | 深树传播超时/死循环 | F006,F007 | 中 | 中 | BFS + visited 去重 + 30s 超时回滚 |
 | R006 | `authDatasetCollection` 由透传 dataset 权限改为 collection 维度解析，影响其全部调用方（collection/read、detail、export、update 等）及检索链路（FR-11） | F011,F012,F014 | 中 | 高 | 新增独立「可读 collection 批量解析」函数仅检索链路使用，`authDatasetCollection` 语义变更以版本化发布 + 全量回归控制（T-7 默认方案） |
 | R007 | 检索文件级过滤的挂载位置与召回计数/成本影响：pre-filter（召回前裁剪候选）vs post-filter（召回后过滤命中），涉及 embedding/fullText 召回计数、reRank token 成本、`limit` 截断（草稿 T-6 衔接策略，对应本规格 T-7） | F014 | 中 | 高 | 默认方案：召回前在 `collectionIds` 展开处预过滤；对 limit 截断与 reRank 成本设性能基线并压测（NFR-7）；pre/post 双路径回归兜底 |
 
@@ -1410,7 +1375,6 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 [本系统]
   ├── 依赖 → [MongoDB resource_permissions](必需,影响:高 - clbs 存储)
   ├── 依赖 → [MongoDB dataset_collections](必需,影响:高 - collection 继承字段)
-  ├── 依赖 → [MongoDB datasets](必需,影响:高 - permissionEffectScope)
   └── 依赖 → [Team/MemberGroup/Org 服务](必需,影响:中 - group/org 权限叠加)
 
 [被依赖情况]
@@ -1426,12 +1390,12 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | 团队/成员组/组织服务 | 内部服务 | 必需 | 99.9% | group/org 解析失败按无权限处理（fail-closed） |
 | 审计日志 | 内部服务 | 可选 | 99% | 异步写入，失败不影响主流程 |
 
-### 6.5 影响范围评估
+### 6.5 影响继承控制评估
 
 **本需求实现后的影响**:
-- ✅ 正向影响: 同一 dataset 下按文件控制访问范围；文件夹权限传播可控；move/恢复继承/changeOwner 后权限无残留、无泄漏；存量数据一键迁移到新语义。
+- ✅ 正向影响: 同一 dataset 下按文件控制访问继承控制；文件夹权限传播可控；move/恢复继承/changeOwner 后权限无残留、无泄漏；存量数据一键迁移到新语义。
 - ⚠️ 需要注意: `authDatasetCollection` 从透传 dataset 权限改为 collection 维度解析，涉及所有 collection 读/写/列表接口及检索链路的鉴权行为变化，需对既有用户权限体验做回归（可能暴露此前「dataset 有权限即 collection 有权限」下被掩盖的无权限场景）；检索链路叠加文件级过滤后，原「有 dataset read 即召回全部」的用户其召回结果将按文件级权限裁剪，需在发布说明中向用户同步该行为变化。
-- 📋 需要同步的团队: 前端知识库管理页（协作者配置 UI、生效范围选择、恢复继承、转移所有权入口）、运维（升级接口执行窗口）、QA（检索过滤越权/漏召回回归用例 + 权限负向用例）。
+- 📋 需要同步的团队: 前端知识库管理页（协作者配置 UI、继承控制选择、恢复继承、转移所有权入口）、运维（升级接口执行窗口）、QA（检索过滤越权/漏召回回归用例 + 权限负向用例）。
 
 ---
 
@@ -1440,10 +1404,9 @@ folderPer（继承态且有父级则取父级权限，否则 0；父级 owner �
 | 编号 | 问题 | 本规格默认方案 | 备注 |
 |------|------|--------------|------|
 | T-1 | collection 维度 clbs 存储方式：`resourceType` 新增 `collection` 枚举 vs 复用 `dataset` 类型以 collectionId 作 resourceId | 新增 `collection` 枚举（与 `getTmbPermission` 按 resourceType+resourceId 查询链路一致） | 需评估 proApi/admin/检索全链路影响 |
-| T-2 | `permissionEffectScope` 变更是否允许「仅变更范围」独立请求；非 folder 传 `currentOnly` 忽略 or 报错 | folder 允许独立范围变更；非 folder 传 `currentOnly` 返回参数错误 | — |
 | T-3 | 升级接口（F010）暴露方式（内部运维命令 vs API）、鉴权级别、是否幂等键 | **已冻结**：HTTP API `POST /api/proApi/core/dataset/upgradePermission`；系统管理员或团队 owner 鉴权；`idempotencyKey` 必填；单次 >30s 自动转异步任务（新增 `dataset_upgrade_tasks` + 任务查询接口 + `rootDatasetId` 续跑） | 已冻结（对应 W-2） |
 | T-4 | collection changeOwner 前端触发入口与传参；外链/OpenAPI 表在 collection 级是否需同步 | **已冻结**：入口为 collection 设置「转移所有权」（传 collectionId+ownerId）；collection 级**不同步**外链/OpenAPI 表——外链/OpenAPI 记录绑定 app（`OutLink.appId` 必填），collection 无独立外链资源形态；dataset 级沿用现有逻辑 | 已冻结（对应 W-4） |
-| T-5 | 「自动增加父级仅当前读权限」场景是否实现 | 不实现（不自动扩权，避免权限扩散） | wiki 待补充 |
+| T-5 | 子资源缺少知识库 read 权限时是否自动补授 | 不实现（不自动扩权，避免权限扩散）；文件级授权不能绕过知识库权限门槛 | 已冻结
 | T-6 | folder 配置时下发目标集合：草稿 FR-2「非继承态子 folder 同步」与继承态不变量冲突 | **已冻结**：仅同步 `inheritPermission=true` 子 folder（以 `syncChildrenPermission` 现有语义为准）；非继承子 folder 不被覆盖（已补反例验收）；草稿 FR-2 冲突措辞已删除 | 已冻结（对应 W-1 / R002） |
 | T-7 | 检索文件级过滤与既有 dataset 级检索鉴权/召回路径的衔接（草稿 fr-nfr-draft.md 编号 T-6；本规格 T-6 已被 folder 下发目标集合占用并冻结，故编为 T-7）：`authDatasetCollection` 返回语义是否修改；过滤位置（召回前预过滤 vs 召回后过滤）；chat / searchTest / OpenAPI 是否统一函数；OpenAPI 过滤的 tmbId 语义 | 默认方案：新增独立「可读 collection 批量解析」函数仅检索链路使用（`authDatasetCollection` 不改变既有调用方语义，降低回归面）；召回前在 `collectionFilter` 的 collectionIds 展开处预过滤；chat / searchTest / OpenAPI 统一复用同一过滤函数（OpenAPI 按 apikey 关联 tmbId）；性能预算见 NFR-7 | 需评估 pre/post 过滤对 embedding/fullText 计数、reRank token 成本、`limit` 截断的影响（对应 R007） |
 

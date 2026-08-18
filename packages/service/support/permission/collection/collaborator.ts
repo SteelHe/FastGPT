@@ -1,13 +1,9 @@
 import { MongoDatasetCollection } from '../../../core/dataset/collection/schema';
-import { MongoResourcePermission } from '../schema';
 import { getDatasetEffectiveClbs, getResourceOwnedClbs } from '../controller';
-import { syncChildrenPermission } from '../inheritPermission';
+import { syncChildrenPermission, syncCollaborators } from '../inheritPermission';
 import { mongoSessionRun } from '../../../common/mongo/sessionRun';
-import { pickCollaboratorIdFields } from '../utils';
-import type { ClientSession } from '../../../common/mongo';
 import { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
 import { OwnerRoleVal, PerResourceTypeEnum } from '@fastgpt/global/support/permission/constant';
-import type { CollaboratorItemType } from '@fastgpt/global/support/permission/collaborator';
 import { mergeCollaboratorList } from '@fastgpt/global/support/permission/utils';
 import type { DatasetCollectionSchemaType } from '@fastgpt/global/core/dataset/type';
 
@@ -15,10 +11,10 @@ import type { DatasetCollectionSchemaType } from '@fastgpt/global/core/dataset/t
  * Resume a Collection's inherited permission
  * - non-folder: only set `inheritPermission=true`; its effective permission is
  *   dynamically merged at auth time, no snapshot is written;
- * - folder: rebuild the snapshot as `parent(owner->manage) + own owner`, replace
- *   own clbs, set `inheritPermission=true`, and re-sync inherited descendant
- *   Folders through `syncChildrenPermission` (sumPer). Non-inherited descendants
- *   are never overwritten.
+ * - folder: merge the parent clbs into its own snapshot via `syncCollaborators`
+ *   (owner->manage, sumPer keeps the own owner and any independent clbs), set
+ *   `inheritPermission=true`, and re-sync inherited descendant Folders through
+ *   `syncChildrenPermission` (sumPer). Non-inherited descendants are never overwritten.
  */
 export async function resumeCollectionInheritPermission({
   collection,
@@ -53,23 +49,24 @@ export async function resumeCollectionInheritPermission({
           session
         });
 
-    // 2. rebuild snapshot: parent(owner->manage) + own owner
-    const snapshot = mergeCollaboratorList({
-      parentClbs,
-      childClbs: [{ tmbId: String(collection.tmbId), permission: OwnerRoleVal }]
+    // 2. 将父级 clbs 并入自身快照（owner→manage，sumPer 保留自身独立 clbs 与 owner）
+    await syncCollaborators({
+      resourceType: PerResourceTypeEnum.collection,
+      teamId,
+      resourceId: collectionId,
+      // syncCollaborators 会原地把入参 owner 改为 manage，传副本避免污染 parentClbs
+      collaborators: parentClbs.map((clb) => ({ ...clb })),
+      session
     });
 
-    // 3. full replace own clbs
-    await replaceOwnClbs({ sanitized: snapshot, collectionId, teamId, session });
-
-    // 4. resume inheritance
+    // 3. resume inheritance
     await MongoDatasetCollection.updateOne(
       { _id: collection._id },
       { inheritPermission: true },
       { session }
     );
 
-    // 5. re-sync inherited descendant folders via the generic syncChildrenPermission
+    // 4. re-sync inherited descendant folders via the generic syncChildrenPermission
     await syncChildrenPermission({
       resource: {
         _id: collectionId,
@@ -81,45 +78,10 @@ export async function resumeCollectionInheritPermission({
       resourceType: PerResourceTypeEnum.collection,
       resourceModel: MongoDatasetCollection,
       session,
-      collaborators: snapshot
+      collaborators: mergeCollaboratorList({
+        parentClbs,
+        childClbs: [{ tmbId: String(collection.tmbId), permission: OwnerRoleVal }]
+      })
     });
   });
 }
-
-/* ============ internal helpers ============ */
-
-/** Full replace of a resource's own clbs inside a transaction. */
-const replaceOwnClbs = async ({
-  sanitized,
-  collectionId,
-  teamId,
-  session
-}: {
-  sanitized: CollaboratorItemType[];
-  collectionId: string;
-  teamId: string;
-  session: ClientSession;
-}) => {
-  // Both deleteMany and insertMany must run inside the same transaction session
-  // (Warning-2): if the surrounding mongoSessionRun transaction rolls back,
-  // the delete must roll back together with the insert, otherwise the resource's
-  // collaborators would be lost while the new config is not persisted.
-  await MongoResourcePermission.deleteMany(
-    {
-      resourceId: collectionId,
-      resourceType: PerResourceTypeEnum.collection,
-      teamId
-    },
-    { session }
-  );
-  await MongoResourcePermission.insertMany(
-    sanitized.map((clb) => ({
-      permission: clb.permission,
-      ...pickCollaboratorIdFields(clb),
-      resourceId: collectionId,
-      teamId,
-      resourceType: PerResourceTypeEnum.collection
-    })),
-    { session }
-  );
-};

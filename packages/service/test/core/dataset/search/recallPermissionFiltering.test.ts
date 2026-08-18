@@ -14,9 +14,9 @@ import { getFakeUsers } from '@test/datas/users';
  * 不存在的 collectionId 字段（应为 _id），导致真子集权限过滤时全文召回被清空。
  *
  * 本文件在真实 MongoDB 上直接调用 fullTextRecall / embeddingRecall，覆盖 RF-004 的
- * "embedding 与 full-text 均应用 collectionId IN effectiveCollectionIdList" 断言：
+ * "embedding 与 full-text 均应用 collectionId IN filterCollectionIdList" 断言：
  * - 召回候选同时包含可读与不可读 collection（模拟向量库/全文索引延迟或旧索引）；
- * - 真子集 effectiveCollectionIdList=[可读] 时，Mongo 回查防线只保留可读 collection 的结果，
+ * - 真子集 filterCollectionIdList=[可读] 时，Mongo 回查防线只保留可读 collection 的结果，
  *   既不被清空（修复点），也不泄漏不可读 collection（不过滤越权）。
  *
  * 外部依赖 mock（与既有 defaultRecall.test.ts 一致）：
@@ -135,7 +135,7 @@ describe('fullTextRecall 权限过滤回查防线（RF-004）', () => {
   });
 
   it(
-    'RF-004: 真子集 effectiveCollectionIdList=[c1] 时全文召回不被清空，且只含 c1（不过滤越权）',
+    'RF-004: 真子集 filterCollectionIdList=[c1] 时全文召回不被清空，且只含 c1（不过滤越权）',
     async () => {
       const { teamId, datasetId, c1, c2, d1, d2 } = await setupDataset();
 
@@ -160,7 +160,7 @@ describe('fullTextRecall 权限过滤回查防线（RF-004）', () => {
         datasetIds: [datasetId],
         queryGroups: [{ source: 'text', queries: ['readable'] }],
         limit: 10,
-        effectiveCollectionIdList: [c1],
+        filterCollectionIdList: [c1],
         forbidCollectionIdList: []
       });
 
@@ -184,7 +184,7 @@ describe('fullTextRecall 权限过滤回查防线（RF-004）', () => {
   );
 
   it(
-    'control: 未启用权限过滤（无 effectiveCollectionIdList）时全文召回同时含 c1 与 c2',
+    'control: 未启用权限过滤（无 filterCollectionIdList）时全文召回同时含 c1 与 c2',
     async () => {
       const { teamId, datasetId, c1, c2, d1, d2 } = await setupDataset();
 
@@ -238,7 +238,7 @@ describe('embeddingRecall 权限过滤回查防线（RF-004）', () => {
   });
 
   it(
-    'RF-004: 真子集 effectiveCollectionIdList=[c1] 时向量召回不被清空，只含 c1，且 filterCollectionIdList 下传',
+    'RF-004: 真子集 filterCollectionIdList=[c1] 时向量召回不被清空，只含 c1，且 filterCollectionIdList 下传',
     async () => {
       const { teamId, datasetId, c1, c2 } = await setupDataset();
 
@@ -259,10 +259,10 @@ describe('embeddingRecall 权限过滤回查防线（RF-004）', () => {
         imageCaptionQueries: [],
         limit: 10,
         forbidCollectionIdList: [],
-        effectiveCollectionIdList: [c1]
+        filterCollectionIdList: [c1]
       });
 
-      // 向量层已应用 collectionId IN effectiveCollectionIdList
+      // 向量层已应用 collectionId IN filterCollectionIdList
       expect(mockRecallFromVectorStore).toHaveBeenCalledWith(
         expect.objectContaining({ filterCollectionIdList: [c1] })
       );
@@ -281,7 +281,7 @@ describe('embeddingRecall 权限过滤回查防线（RF-004）', () => {
   );
 
   it(
-    'control: 未启用权限过滤（无 effectiveCollectionIdList）时向量召回同时含 c1 与 c2',
+    'control: 未启用权限过滤（无 filterCollectionIdList）时向量召回同时含 c1 与 c2',
     async () => {
       const { teamId, datasetId, c1, c2 } = await setupDataset();
 
@@ -314,13 +314,13 @@ describe('embeddingRecall 权限过滤回查防线（RF-004）', () => {
   );
 });
 
-describe('embeddingRecall / fullTextRecall 同一 effectiveCollectionIdList 的 forbid 兼容', () => {
+describe('embeddingRecall / fullTextRecall 同一 filterCollectionIdList 的 forbid 兼容', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it(
-    'forbidCollectionIdList 与 effectiveCollectionIdList 同时存在时，授权集合仍生效且不被 forbid 误伤',
+    'forbidCollectionIdList 与 filterCollectionIdList 同时存在时，授权集合仍生效且不被 forbid 误伤',
     async () => {
       const { teamId, datasetId, c1, c2, d1 } = await setupDataset();
 
@@ -339,7 +339,7 @@ describe('embeddingRecall / fullTextRecall 同一 effectiveCollectionIdList 的 
         datasetIds: [datasetId],
         queryGroups: [{ source: 'text', queries: ['readable'] }],
         limit: 10,
-        effectiveCollectionIdList: [c1],
+        filterCollectionIdList: [c1],
         forbidCollectionIdList: [c2]
       });
 
