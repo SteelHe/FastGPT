@@ -19,8 +19,8 @@ import { MongoGroupMemberModel } from '@fastgpt/service/support/permission/membe
 import { MongoOrgModel } from '@fastgpt/service/support/permission/org/orgSchema';
 import { MongoOrgMemberModel } from '@fastgpt/service/support/permission/org/orgMemberSchema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
-import { resolveCollectionPermission } from '@fastgpt/service/support/permission/collection/resolvePermission';
-import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import { resolveCollectionPermission } from '@fastgpt/service/support/permission/collection/auth';
+import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/auth';
 import { getFakeUsers } from '@test/datas/users';
 
 const oid = () => new Types.ObjectId().toString();
@@ -60,12 +60,13 @@ describe('sanitizeCollaboratorPermissions ', () => {
 });
 
 describe('resolveCollectionPermission ', () => {
-  it('inherited non-folder collection merges parent Collection Folder snapshot permission', async () => {
+  it('inherited non-folder collection reads its own full snapshot (parent contribution merged at write time)', async () => {
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const folderId = oid();
     const collectionId = oid();
 
+    // 全快照模型：父 Folder 的 member1 read 已并入子 Collection 自身快照
     await MongoResourcePermission.insertMany([
       {
         resourceType: PerResourceTypeEnum.collection,
@@ -78,6 +79,13 @@ describe('resolveCollectionPermission ', () => {
         resourceType: PerResourceTypeEnum.collection,
         teamId,
         resourceId: folderId,
+        tmbId: users.members[0].tmbId,
+        permission: ReadRoleVal
+      },
+      {
+        resourceType: PerResourceTypeEnum.collection,
+        teamId,
+        resourceId: collectionId,
         tmbId: users.members[0].tmbId,
         permission: ReadRoleVal
       }
@@ -134,20 +142,29 @@ describe('resolveCollectionPermission ', () => {
     expect(per).toBe(NullRoleVal);
   });
 
-  it('caps parent owner to manage (owner is not passed through)', async () => {
+  it('parent folder owner is stored as manage in the child snapshot (owner not passed through)', async () => {
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const folderId = oid();
     const collectionId = oid();
 
-    // member1 is the parent folder owner; member1 has no record on the child collection
-    await MongoResourcePermission.create({
-      resourceType: PerResourceTypeEnum.collection,
-      teamId,
-      resourceId: folderId,
-      tmbId: users.members[0].tmbId,
-      permission: OwnerRoleVal
-    });
+    // member1 is the parent folder owner; full snapshot writes member1 as manage on the child
+    await MongoResourcePermission.insertMany([
+      {
+        resourceType: PerResourceTypeEnum.collection,
+        teamId,
+        resourceId: folderId,
+        tmbId: users.members[0].tmbId,
+        permission: OwnerRoleVal
+      },
+      {
+        resourceType: PerResourceTypeEnum.collection,
+        teamId,
+        resourceId: collectionId,
+        tmbId: users.members[0].tmbId,
+        permission: ManageRoleVal
+      }
+    ]);
 
     const per = await resolveCollectionPermission({
       collection: {
@@ -167,9 +184,18 @@ describe('resolveCollectionPermission ', () => {
     expect(per).toBe(ManageRoleVal);
   });
 
-  it('root-level inherited collection relies on datasetPermission', async () => {
+  it('root-level inherited collection reads its own full snapshot (dataset contribution merged at write time)', async () => {
     const users = await getFakeUsers(1);
     const collectionId = oid();
+
+    // 全快照模型：根级 Collection 的 Dataset 有效角色已并入自身快照，datasetPermission 参数弃用
+    await MongoResourcePermission.create({
+      resourceType: PerResourceTypeEnum.collection,
+      teamId: users.owner.teamId,
+      resourceId: collectionId,
+      tmbId: users.members[0].tmbId,
+      permission: WriteRoleVal
+    });
 
     const withDataset = await resolveCollectionPermission({
       collection: {
@@ -183,25 +209,9 @@ describe('resolveCollectionPermission ', () => {
       teamId: users.owner.teamId,
       groupIds: [],
       orgIds: [],
-      datasetPermission: WriteRoleVal // write implies read
+      datasetPermission: WriteRoleVal // 已弃用，不影响结果
     });
     expect(withDataset).toBe(WriteRoleVal);
-
-    const withoutDataset = await resolveCollectionPermission({
-      collection: {
-        _id: collectionId,
-        tmbId: users.owner.tmbId,
-        parentId: null,
-        inheritPermission: true,
-        type: DatasetCollectionTypeEnum.file
-      },
-      tmbId: users.members[0].tmbId,
-      teamId: users.owner.teamId,
-      groupIds: [],
-      orgIds: [],
-      datasetPermission: NullRoleVal
-    });
-    expect(withoutDataset).toBe(NullRoleVal);
   });
 
   it('merges group permission into the collection own permission', async () => {
@@ -352,7 +362,7 @@ describe('resolveCollectionPermission ', () => {
 });
 
 describe('getReadableCollectionIds ', () => {
-  it('returns owner self-readable and inherited child via parent folder snapshot', async () => {
+  it('reads full snapshots directly: owner self-readable, child readable via its own snapshot record', async () => {
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const folderId = oid();
@@ -372,6 +382,14 @@ describe('getReadableCollectionIds ', () => {
         resourceType: PerResourceTypeEnum.collection,
         teamId,
         resourceId: folderId,
+        tmbId: users.members[0].tmbId,
+        permission: ReadRoleVal
+      },
+      // child full snapshot: parent contribution (member1 read) merged in
+      {
+        resourceType: PerResourceTypeEnum.collection,
+        teamId,
+        resourceId: childId,
         tmbId: users.members[0].tmbId,
         permission: ReadRoleVal
       },
@@ -421,10 +439,19 @@ describe('getReadableCollectionIds ', () => {
     expect(readable.sort()).toEqual([folderId, childId, ownId].sort());
   });
 
-  it('root-level inherited collection readability depends on datasetPermission', async () => {
+  it('root-level inherited collection readability comes from its own full snapshot', async () => {
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const rootId = oid();
+
+    // 全快照：根级 Collection 快照已含 Dataset 贡献（member1 read）
+    await MongoResourcePermission.create({
+      resourceType: PerResourceTypeEnum.collection,
+      teamId,
+      resourceId: rootId,
+      tmbId: users.members[0].tmbId,
+      permission: ReadRoleVal
+    });
 
     const collections = [
       {
@@ -446,6 +473,7 @@ describe('getReadableCollectionIds ', () => {
     });
     expect(withRead).toEqual([rootId]);
 
+    // datasetPermission 参数已弃用，不影响结果
     const withoutRead = await getReadableCollectionIds({
       collections,
       tmbId: users.members[0].tmbId,
@@ -454,7 +482,7 @@ describe('getReadableCollectionIds ', () => {
       orgIds: [],
       datasetPermission: NullRoleVal
     });
-    expect(withoutRead).toEqual([]);
+    expect(withoutRead).toEqual([rootId]);
   });
 
   it('non-inherited folder without own record is not readable via parent', async () => {
@@ -549,9 +577,8 @@ describe('getReadableCollectionIds ', () => {
     });
     expect(withFlagNoRead).toEqual([]);
 
-    // 未传 flag（默认 undefined=未知）→ 走完整解析：
-    // 对根级继承 collection，完整解析同样基于 Dataset read 判可读（rootInheritedReadable），结果一致；
-    // 对非继承（独立）collection，完整解析尊重独立配置（无自身记录则不可读）——undefined 不做短路是安全回退。
+    // 未传 flag（默认 undefined=未知）→ 走完整解析：全快照下每个 Collection 的可读性取决于
+    // 自身快照记录；c1/c2 无任何快照记录 → 不可读。undefined 不做短路是安全回退。
     const withoutFlag = await getReadableCollectionIds({
       collections,
       tmbId: users.members[0].tmbId,
@@ -560,7 +587,7 @@ describe('getReadableCollectionIds ', () => {
       orgIds: [],
       datasetPermission: ReadRoleVal
     });
-    expect(withoutFlag.sort()).toEqual([c1, c2].sort());
+    expect(withoutFlag.sort()).toEqual([]);
 
     const independentId = oid();
     const withoutFlagIndependent = await getReadableCollectionIds({

@@ -35,9 +35,9 @@ import { getS3DatasetSource } from '../../../common/s3/sources/dataset';
 import { removeS3TTL, isS3ObjectKey } from '../../../common/s3/utils';
 import {
   createCollectionPermission,
+  deleteCollectionPermissions,
   getCollectionCreateParentClbs
-} from '../../../support/permission/collection/create';
-import { deleteCollectionPermissions } from '../../../support/permission/collection/cleanup';
+} from '../../../support/permission/collection/controller';
 import type {
   CreateCollectionWithResultResponseType,
   ApiCreateDatasetCollectionParams

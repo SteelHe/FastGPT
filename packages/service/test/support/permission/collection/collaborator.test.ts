@@ -14,7 +14,7 @@ import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { getResourceOwnedClbs } from '@fastgpt/service/support/permission/controller';
-import { resolveCollectionPermission } from '@fastgpt/service/support/permission/collection/resolvePermission';
+import { resolveCollectionPermission } from '@fastgpt/service/support/permission/collection/auth';
 import { resumeCollectionInheritPermission } from '@fastgpt/service/support/permission/collection/collaborator';
 import { getFakeUsers } from '@test/datas/users';
 

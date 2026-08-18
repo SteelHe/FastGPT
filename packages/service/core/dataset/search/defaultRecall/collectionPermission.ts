@@ -1,13 +1,12 @@
 import { MongoDatasetCollection } from '../../collection/schema';
-import { MongoDataset } from '../../schema';
 import { getTmbInfoByTmbId } from '@fastgpt/service/support/user/team/controller';
 import { getGroupsByTmbId } from '@fastgpt/service/support/permission/memberGroup/controllers';
 import { getOrgIdSetWithParentByTmbId } from '@fastgpt/service/support/permission/org/controllers';
 import {
   canShortCircuitCollectionPermission,
   getReadableCollectionIds
-} from '@fastgpt/service/support/permission/collection/readableCollection';
-import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/type';
+} from '@fastgpt/service/support/permission/collection/auth';
+import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/auth';
 import { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
 import { ReadRoleVal } from '@fastgpt/global/support/permission/constant';
 
@@ -139,8 +138,7 @@ export async function resolveReadableCollectionIds({
     return undefined;
   }
 
-  // 仅加载文件类型 Collection（folder 可读性由 getReadableCollectionIds 经父级快照判定，
-  // 结果只需文件 ID，无需后续 folder 展开）。
+  // 仅加载文件类型 Collection（全快照下 folder 自身快照即可判定可读性，结果只需文件 ID）
   const collections = await MongoDatasetCollection.find(
     {
       teamId,

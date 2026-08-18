@@ -14,8 +14,8 @@ import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection
 import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { getResourceOwnedClbs } from '@fastgpt/service/support/permission/controller';
 import { syncDatasetCollectionFolders } from '@fastgpt/service/support/permission/collection/folderSync';
-import { deleteCollectionPermissions } from '@fastgpt/service/support/permission/collection/cleanup';
-import { resolveCollectionPermission } from '@fastgpt/service/support/permission/collection/resolvePermission';
+import { deleteCollectionPermissions } from '@fastgpt/service/support/permission/collection/controller';
+import { resolveCollectionPermission } from '@fastgpt/service/support/permission/collection/auth';
 import {
   resumeInheritPermission,
   syncChildrenPermission,
@@ -169,10 +169,18 @@ describe('Dataset permission propagation to Collection Folders ', () => {
             permission: OwnerRoleVal
           },
           {
-            // CF1 自身 owner 记录（生产由 createCollectionPermission 写入；syncCollaborators 需以此保留 owner）
+            // CF1 自身 owner 记录（生产由 createCollectionPermission 写入）
             resourceType: PerResourceTypeEnum.collection,
             teamId,
             resourceId: String(cf1._id),
+            tmbId: ownerTmb,
+            permission: OwnerRoleVal
+          },
+          {
+            // C1 自身 owner 记录（全快照下每个 Collection 都有快照）
+            resourceType: PerResourceTypeEnum.collection,
+            teamId,
+            resourceId: String(c1._id),
             tmbId: ownerTmb,
             permission: OwnerRoleVal
           }
@@ -180,9 +188,7 @@ describe('Dataset permission propagation to Collection Folders ', () => {
         { session }
       );
 
-      // change F1 collaborators: add M1 read. For a folder, updateResourceCollaborators runs
-      // syncChildrenPermission(F1, newClbs) first; then Collection Folder propagation seeds
-      // from F1's effective clbs (F1 is root-level, so effective = its own clbs).
+      // change F1 collaborators: add M1 read. 旧有效 clbs = F1 自身 [owner]，新有效 = [owner, M1 read]
       const newF1Clbs = [
         { tmbId: ownerTmb, permission: OwnerRoleVal },
         { tmbId: m1, permission: ReadRoleVal }
@@ -198,6 +204,7 @@ describe('Dataset permission propagation to Collection Folders ', () => {
       await syncDatasetCollectionFolders({
         teamId,
         datasetId: String(f1._id),
+        oldRootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
         rootClbs: newF1Clbs,
         session
       });
@@ -208,7 +215,10 @@ describe('Dataset permission propagation to Collection Folders ', () => {
     expect(cf1Map.get(m1)).toBe(ReadRoleVal);
     expect(cf1Map.get(ownerTmb)).toBe(OwnerRoleVal);
 
-    // C1 (ordinary inherited collection) resolves read for M1 via CF1 snapshot, with no own record written
+    // C1 (inherited file) 也重建为完整快照：cf1 快照 + 自身 owner
+    const c1Map = await snapshotMap(teamId, String(c1._id));
+    expect(c1Map.get(m1)).toBe(ReadRoleVal);
+    expect(c1Map.get(ownerTmb)).toBe(OwnerRoleVal);
     const c1Per = await resolveCollectionPermission({
       collection: {
         _id: String(c1._id),
@@ -224,13 +234,6 @@ describe('Dataset permission propagation to Collection Folders ', () => {
       datasetPermission: NullRoleVal
     });
     expect(c1Per).toBe(ReadRoleVal);
-    expect(
-      await MongoResourcePermission.countDocuments({
-        resourceType: PerResourceTypeEnum.collection,
-        teamId,
-        resourceId: String(c1._id)
-      })
-    ).toBe(0);
   });
 
   it('DP-002: dataset move with inheritPermission=true re-seeds collection folder snapshots from the new parent clbs', async () => {
@@ -307,7 +310,8 @@ describe('Dataset permission propagation to Collection Folders ', () => {
       );
 
       // simulate move (inherit=true): syncCollaborators merges target parent clbs into D1,
-      // then Collection Folder sync seeds from D1's effective clbs (read back after merge)
+      // then Collection Folder sync seeds from D1's effective clbs (read back after merge).
+      // 旧有效 clbs = 移动前 D1 有效 = merge(oldParent[owner], D1 own[owner]) = [owner]
       const parentClbs = await getResourceOwnedClbs({
         teamId,
         resourceId: String(newParent._id),
@@ -327,7 +331,13 @@ describe('Dataset permission propagation to Collection Folders ', () => {
         resourceType: PerResourceTypeEnum.dataset,
         session
       });
-      await syncDatasetCollectionFolders({ teamId, datasetId: String(d1._id), rootClbs, session });
+      await syncDatasetCollectionFolders({
+        teamId,
+        datasetId: String(d1._id),
+        oldRootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
+        rootClbs,
+        session
+      });
     });
 
     const cf1Map = await snapshotMap(teamId, String(cf1._id));
@@ -376,7 +386,13 @@ describe('Dataset permission propagation to Collection Folders ', () => {
         { tmbId: ownerTmb, permission: OwnerRoleVal },
         { tmbId: m2, permission: ReadRoleVal }
       ];
-      await syncDatasetCollectionFolders({ teamId, datasetId: String(d1._id), rootClbs, session });
+      await syncDatasetCollectionFolders({
+        teamId,
+        datasetId: String(d1._id),
+        oldRootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
+        rootClbs,
+        session
+      });
     });
 
     const privateMap = await snapshotMap(teamId, String(privateF._id));
@@ -447,6 +463,7 @@ describe('Dataset permission propagation to Collection Folders ', () => {
       await syncDatasetCollectionFolders({
         teamId,
         datasetId: String(d1._id),
+        oldRootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
         rootClbs: [
           { tmbId: ownerTmb, permission: OwnerRoleVal },
           { tmbId: m1, permission: WriteRoleVal }
@@ -576,6 +593,7 @@ describe('Dataset permission propagation to Collection Folders ', () => {
         await syncDatasetCollectionFolders({
           teamId,
           datasetId: String(d1._id),
+          oldRootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
           rootClbs,
           session
         });
@@ -602,7 +620,7 @@ describe('Dataset permission propagation to Collection Folders ', () => {
     expect(per2).toEqual(per1);
   });
 
-  it('resume inherit resumeInheritPermission with syncCollectionFolders rebuilds inherited collection folder snapshots', async () => {
+  it('resume dataset inheritance then syncDatasetCollectionFolders rebuilds inherited collection snapshots', async () => {
     const users = await getFakeUsers(2);
     const teamId = users.owner.teamId;
     const ownerTmb = String(users.owner.tmbId);
@@ -672,12 +690,28 @@ describe('Dataset permission propagation to Collection Folders ', () => {
       );
     });
 
-    await resumeInheritPermission({
-      resource: d1,
-      folderTypeList: [DatasetTypeEnum.folder],
-      resourceType: PerResourceTypeEnum.dataset,
-      resourceModel: MongoDataset,
-      syncCollectionFolders: true
+    // d1 恢复前有效 clbs = merge(parent, own) = [owner, M1 read, M2 write]；恢复后不变。
+    // 显式调用 syncDatasetCollectionFolders 重建继承态 Collection 快照（全快照模型）。
+    const effectiveClbs = [
+      { tmbId: ownerTmb, permission: OwnerRoleVal },
+      { tmbId: m1, permission: ReadRoleVal },
+      { tmbId: m2, permission: WriteRoleVal }
+    ];
+    await mongoSessionRun(async (session) => {
+      await resumeInheritPermission({
+        resource: d1,
+        folderTypeList: [DatasetTypeEnum.folder],
+        resourceType: PerResourceTypeEnum.dataset,
+        resourceModel: MongoDataset,
+        session
+      });
+      await syncDatasetCollectionFolders({
+        teamId,
+        datasetId: String(d1._id),
+        oldRootClbs: effectiveClbs,
+        rootClbs: effectiveClbs,
+        session
+      });
     });
 
     // d1 effective = merge(parentClbs, oldMyClbs): inherits parent's M1 read, keeps own M2 write

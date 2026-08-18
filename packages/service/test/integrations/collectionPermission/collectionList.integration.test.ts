@@ -11,7 +11,7 @@ import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { authDatasetCollection } from '@fastgpt/service/support/permission/dataset/auth';
-import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
+import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/auth';
 import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/collection/list/flatten';
 import { filterDatasetsByTmbId } from '@fastgpt/service/core/dataset/utils';
 import { replaceRegChars } from '@fastgpt/global/common/string/tools';

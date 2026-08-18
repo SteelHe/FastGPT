@@ -11,7 +11,7 @@ import { type ChatNodeUsageType } from '@fastgpt/global/support/wallet/bill/type
 import { MongoDataset } from '../../../dataset/schema';
 import { i18nT } from '@fastgpt/global/common/i18n/utils';
 import { filterDatasetsByTmbId } from '../../../dataset/utils';
-import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import { getDatasetSearchToolResponsePrompt } from '@fastgpt/global/core/ai/prompt/dataset.const';
 import { getNodeErrResponse } from '../utils';
 import { getLogger, LogCategories } from '../../../../common/logger';

@@ -5,10 +5,10 @@ import { PerResourceTypeEnum, ReadRoleVal } from '@fastgpt/global/support/permis
 import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
-import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/readableCollection';
-import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+import { getReadableCollectionIds } from '@fastgpt/service/support/permission/collection/auth';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/collection/list/flatten';
-import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/type';
+import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/auth';
 import { getFakeUsers } from '@test/datas/users';
 
 /**
@@ -220,7 +220,7 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
       tmbId: String(users.owner.tmbId),
       count: 100
     });
-    // member: dataset read + 全继承 → getReadableCollectionIds 一次 distinct
+    // member: dataset read + 全快照（每个文件快照含 m1 read）→ getReadableCollectionIds 一次 distinct
     await MongoResourcePermission.create({
       resourceType: PerResourceTypeEnum.dataset,
       teamId,
@@ -228,6 +228,7 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
       tmbId: m1,
       permission: ReadRoleVal
     });
+    await seedPerCollectionReads({ teamId, tmbId: m1, items });
 
     const avg = await measure('rag 100 文件', async () => {
       const readable = await resolveReadableCollectionIds({
@@ -267,7 +268,7 @@ describe('Collection 权限列表/检索性能冒烟', { timeout: 600_000 }, () 
       tmbId: m1,
       permission: ReadRoleVal
     });
-    void items;
+    await seedPerCollectionReads({ teamId, tmbId: m1, items });
 
     const avg = await measure('rag 1w 文件', async () => {
       const readable = await resolveReadableCollectionIds({

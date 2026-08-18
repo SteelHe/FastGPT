@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
-import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/type';
+import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/auth';
 import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/collection/list/flatten';
 
 /** 构建一个最小权限字段的 Collection 节点。 */

@@ -24,7 +24,7 @@ vi.mock('@fastgpt/service/core/dataset/search', () => ({
 
 // dispatchDatasetSearch 引入 resolveReadableCollectionIds；测试用 authTmbId=false 不触发调用。
 // 整体 mock 该模块可避免加载真实依赖链（collection/schema → dataset/schema 的 ChunkSettings）干扰本测试。
-vi.mock('@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection', () => ({
+vi.mock('@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission', () => ({
   resolveReadableCollectionIds: vi.fn()
 }));
 

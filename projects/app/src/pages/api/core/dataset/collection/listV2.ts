@@ -31,8 +31,8 @@ import { buildFlattenedCollectionList } from '@fastgpt/service/core/dataset/coll
 import {
   canShortCircuitCollectionPermission,
   getReadableCollectionIds
-} from '@fastgpt/service/support/permission/collection/readableCollection';
-import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/type';
+} from '@fastgpt/service/support/permission/collection/auth';
+import type { CollectionPermissionItemType } from '@fastgpt/service/support/permission/collection/auth';
 import { getGroupsByTmbId } from '@fastgpt/service/support/permission/memberGroup/controllers';
 import { getOrgIdSetWithParentByTmbId } from '@fastgpt/service/support/permission/org/controllers';
 

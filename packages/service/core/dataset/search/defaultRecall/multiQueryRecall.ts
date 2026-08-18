@@ -1,5 +1,5 @@
 import { getForbidCollectionIdList, filterCollectionByMetadata } from './collectionFilter';
-import { decideCollectionFilter } from './effectiveCollection';
+import { decideCollectionFilter } from './collectionPermission';
 import { embeddingRecall } from './embeddingRecall';
 import { fullTextRecall } from './fullTextRecall';
 

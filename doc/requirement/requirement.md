@@ -59,7 +59,7 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 
 1. 管理员在 dataset 下创建文件 collection → 默认继承父级权限（US-3）。
 2. 管理员对单个文件配置协作者（read/write/manage）→ 同 dataset 不同文件解析出不同权限（US-1 / US-7）。
-4. 管理员移动文件/文件夹 → 选择「继承新父级权限」或「保持独立配置」（US-5）。
+4. 管理员移动文件/文件夹 → 保持其本身的继承关系不变：原继承态继承新父级权限，原独立态保持独立配置（US-5）。
 5. 管理员恢复误配置资源的继承（US-6）。
 6. 管理员配置的子级权限与父级冲突 → 自动取消继承并保留独立配置（US-8）。
 7. owner 将资源所有权转移给成员（US-9）。
@@ -307,18 +307,19 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 
 **功能类型**: 增量功能
 **功能实现类型**: 接口功能
-**业务目标**: 移动 dataset / collection 到新父目录时，允许操作者选择「继承新父目录权限」（默认）或「保持独立配置」，确保移动后权限不泄漏、不残留（US-5）。
-**技术目标**: 修复现有 move 恒置 `inheritPermission=true` 并同步父级 clbs 的「残留 BUG」（`projects/app/src/pages/api/core/dataset/update.ts:230`），改为策略化；复用 `checkMoveFolderDepth` 环/深度检测；整流程单事务。
+**业务目标**: 移动 dataset / collection 到新父目录时，**保持资源自身的继承关系不变**——原继承态资源继续继承（按新父级合并权限），原独立态资源保持独立配置（仅更新 `parentId`），不允许通过 move 改变继承关系；确保移动后权限不泄漏、不残留（US-5）。
+**技术目标**: 修复现有 move 恒置 `inheritPermission=true` 并同步父级 clbs 的「残留 BUG」（`projects/app/src/pages/api/core/dataset/update.ts:230`），改为**以资源自身继承态为策略**（读 DB 当前值，不接收请求参数）；复用 `checkMoveFolderDepth` 环/深度检测；整流程单事务。
 
 **【如果是增量功能】相关现有功能**:
 - 现有接口: `PUT /api/core/dataset/update` - 代码位置: `projects/app/src/pages/api/core/dataset/update.ts:102-147,245-276`（move 分支）
 - 现有接口: `PUT /api/core/dataset/collection/update` - 代码位置: `projects/app/src/pages/api/core/dataset/collection/update.ts:70-147`（collection 更新，含 parentId 变更）
 - 现有工具: `checkMoveFolderDepth` - 代码位置: `packages/service/common/parentFolder/depth.ts`（环/深度限制）
-- 增量方向: update 接口新增 move 策略参数；move 分支按策略执行权限同步。
+- 增量方向: update 接口**不新增 `inheritPermission` 参数**；move 分支以资源自身 `inheritPermission` 为策略执行权限同步（原继承态继承新父级，原独立态保持独立）。
 
 **接口变更规格（增量）**:
-- **dataset**: `PUT /api/core/dataset/update` 请求体新增 `inheritPermission`（可选布尔，缺省 true=继承新父级）。`parentId` 为必传 move 标记（沿用现有：`parentId !== undefined` 判定为 move）。
-- **collection**: `PUT /api/core/dataset/collection/update` 请求体新增 `parentId`（移动目标，null=根）与 `inheritPermission`（可选布尔，缺省 true）。移动与改名可在同请求内。
+- **dataset**: `PUT /api/core/dataset/update` 请求体**不含 `inheritPermission`**；`parentId` 为必传 move 标记（沿用现有：`parentId !== undefined` 判定为 move），move 时保持 dataset 自身的继承关系。
+- **collection**: `PUT /api/core/dataset/collection/update` 请求体新增 `parentId`（移动目标，null=根），**不含 `inheritPermission`**；移动与改名可在同请求内，move 时保持 collection 自身的继承关系。
+- **创建 dataset（含 folder）**: `POST /api/core/dataset/create`、`POST /api/core/dataset/folder/create`、`POST /api/core/dataset/createWithFiles` 请求体新增 `inheritPermission`（可选布尔，缺省 true=继承父级；false=创建为独立权限资源）。
 - **move 鉴权**: source folder 与 dest folder 均需 `manage` 权限；移到根 / 从根移出需团队 dataset 创建权限（沿用 `authUserPer` + `TeamDatasetCreatePermissionVal`，`update.ts:126-133`）。
 
 ###### 输入定义（增量变更）
@@ -326,12 +327,13 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 | 输入项 | 类型 | 来源 | 必填 | 约束条件 | 示例 |
 |-------|------|------|------|---------|------|
 | parentId | String(ObjectId) / null | 请求参数 | 是(move) | 目标父目录 id；null=根目录；dataset 的 parentId 必须为 folder 类型 dataset，collection 的 parentId 必须为 folder 类型 collection | "660b3f..." |
-| inheritPermission | Boolean | 请求参数 | 否 | true=继承新父级权限（默认）；false=保持独立配置 | true |
+| inheritPermission（仅创建接口） | Boolean | 请求参数 | 否 | true=继承父级（默认）；false=创建为独立权限资源 | true |
 
 **输入校验规则**:
 1. `parentId` 非空时目标必须存在且类型为 folder → 否则 `unAuthDataset` / `unExist`。
 2. 移动形成环（目标为自身的子级）或超出深度限制 → `CommonErrEnum.folderMoveDepthLimit`（`checkMoveFolderDepth`）。
 3. 目标位置与来源位置需同时满足 manage 鉴权；涉及根目录需团队创建权限。
+4. update / move 请求体不接受 `inheritPermission`，移动后的继承关系以资源当前 DB 值为准（不允许通过 move 变更继承关系）。
 
 ###### 输出定义（增量变更）
 
@@ -345,27 +347,28 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 - 用户状态: 对 source 与 dest folder 均有 `manage` 权限（root 涉及团队创建权限）。
 - 数据状态: 无环（`checkMoveFolderDepth` 通过）。
 
-**触发条件**: 操作者选择「继承新父目录权限」并提交 move。
+**触发条件**: 操作者提交 move（目标 parentId），接口不接收 `inheritPermission`，按资源 R 自身继承态处理。
 
 **步骤**:
-1. 用户提交 move 请求（目标 parentId + 策略 `inheritPermission=true`）。
+1. 用户提交 move 请求（仅目标 parentId）。
 2. 系统鉴权 source / dest manage 权限、根目录团队创建权限。
 3. 系统执行 `checkMoveFolderDepth`（环/深度）。
-4. 系统在 mongo session 内：
-   a. 更新资源 `parentId`，置 `inheritPermission=true`。
-   b. 读取新父级 clbs（dest），将自身 clbs 全量替换为「dest 的 clbs（owner 位映射为 manage）+ 自身 owner 记录」；删除源目录特有非 owner 旧 clb，做到源目录权限**零残留**（见权威定义）。
-   c. 调用 `syncChildrenPermission` 将新父级 clbs 下发到所有继承态子资源。
-   d. 若为 dataset move：额外同步到 `datasetId && type:folder` 的 collection（FR-6 第 5 条）。
+4. 系统在 mongo session 内，按 R 当前 `inheritPermission` 分支执行：
+   a. 更新资源 `parentId`；保持 `inheritPermission` 不变（原继承态为 `true`、原独立态为 `false`）。
+   b. **原继承态**：读取新父级 clbs（dest），将自身 clbs 全量替换为「dest 的 clbs（owner 位映射为 manage）+ 自身 owner 记录」；删除源目录特有非 owner 旧 clb，做到源目录权限**零残留**（见权威定义）。
+   c. **原继承态且为 folder**：调用 `syncChildrenPermission` 将新父级 clbs 下发到所有继承态子资源。
+   d. 若为 dataset move：额外同步到 `datasetId && type:folder` 的 collection（FR-6 第 5 条）。**原独立态**：仅更新 parentId，不执行新父级权限同步。
 5. 系统写 move 审计日志。
 
 **后置条件**：
-- 系统状态: R 及其继承态子树 clbs = 新父级 clbs；源目录旧权限无残留。
-- 数据状态: R 的 `inheritPermission=true`。
+- 系统状态（原继承态）: R 及其继承态子树 clbs = 新父级 clbs；源目录旧权限无残留。
+- 数据状态（原独立态）: R 的 `parentId` 已更新，`inheritPermission=false`，自身 clbs 不变。
 - 用户反馈: 成功；前端列表刷新。
 
 **成功标准**：
-- [ ] 继承新父级后，R 的 clbs = dest 的 clbs（owner 位映射为 manage）+ 自身 owner 记录；源目录特有 clb 在 R 及子树上残留数为 0（逐条比对）。
-- [ ] 保持独立配置时，R 及子资源 clbs 保持不变，`inheritPermission=false`。
+- [ ] 原继承态移动后，R 的 clbs = dest 的 clbs（owner 位映射为 manage）+ 自身 owner 记录；源目录特有 clb 在 R 及子树上残留数为 0（逐条比对）。
+- [ ] 原独立态移动后，R 及子资源 clbs 保持不变，`inheritPermission=false`。
+- [ ] move 不改变 R 自身的继承关系（不接受 `inheritPermission` 请求参数）。
 
 ###### 异常路径
 
@@ -378,8 +381,8 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度仅�
 
 | 边界条件 | 处理方式 |
 |---------|---------|
-| 移动到根目录（parentId=null） | dest clbs 为空集；R 自身 clbs 仅保留 owner，`inheritPermission=true` |
-| 从根目录移入文件夹 | 需团队创建权限；执行新父级同步 |
+| 移动到根目录（parentId=null） | dest clbs 为空集；原继承态下 R 自身 clbs 仅保留 owner，`inheritPermission=true`；原独立态下保持独立 clbs，`inheritPermission=false` |
+| 从根目录移入文件夹 | 需团队创建权限；原继承态执行新父级同步，原独立态仅更新 parentId |
 | 同一请求重复提交相同 move | 幂等：第二次执行同步结果一致，产生 0 净变更 |
 | 移动的子树含冲突态非继承 folder | 仅同步继承态子资源；冲突态非继承子 folder 保留独立配置，不被覆盖 |
 | dataset move 且该 dataset 下存在 folder collection | 这些 folder collection 同步为新 dataset 父级权限（FR-6 第 5 条） |

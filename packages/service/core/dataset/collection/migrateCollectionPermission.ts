@@ -12,8 +12,12 @@ import { MongoDataset } from '../schema';
 import { MongoResourcePermission } from '../../../support/permission/schema';
 import type { ResourcePermissionType } from '@fastgpt/global/support/permission/type';
 import { getResourceOwnedClbs } from '../../../support/permission/controller';
-import { syncCollaborators } from '../../../support/permission/inheritPermission';
-import { syncRootCollectionFolders } from '../../../support/permission/collection/folderSync';
+import {
+  deriveOwnClbs,
+  syncCollectionChildrenPermission,
+  syncCollectionCollaborators,
+  syncRootCollections
+} from '../../../support/permission/collection/folderSync';
 
 const logger = getLogger(LogCategories.MODULE.DATASET.COLLECTION);
 
@@ -22,8 +26,11 @@ const logger = getLogger(LogCategories.MODULE.DATASET.COLLECTION);
  * A Collection is considered migrated when its `permissionMigrationVersion`
  * equals this value; re-runs only process Collections that are missing or
  * behind this version.
+ *
+ * v2 = 全快照模型：所有继承态 Collection（Folder + 非 Folder）写入完整有效快照
+ * `merge(父级有效 clbs, 自身 clbs)`；运行时直接读快照。
  */
-export const COLLECTION_PERMISSION_MIGRATION_VERSION = 1;
+export const COLLECTION_PERMISSION_MIGRATION_VERSION = 2;
 
 /** Number of bulkWrite operations executed in one chunk (batch large writes). */
 const BULK_WRITE_CHUNK_SIZE = 1000;
@@ -72,9 +79,9 @@ export const computeOwnerRecord = (collection: CollectionForMigration): Collabor
 });
 
 /**
- * Compute the `resource_permissions` snapshot of an inherited Collection Folder:
- * `merge(parentEffectiveClbs, [own owner])`, where the parent's owner is mapped to
- * `manage` by `mergeCollaboratorList` (owner is not passed through).
+ * Compute the `resource_permissions` snapshot of an inherited Collection (全快照模型)：
+ * `merge(parentEffectiveClbs, [own owner])`，父级 owner 由 `mergeCollaboratorList` 映射为 manage。
+ * 纯函数，供单测与迁移校验复用。
  */
 export const computeFolderSnapshot = ({
   collection,
@@ -252,7 +259,8 @@ export const sameClbs = (a: CollaboratorItemType[], b: CollaboratorItemType[]): 
   return true;
 };
 
-/** Execute bulkWrite in bounded chunks. */ const chunkedBulkWrite = async (
+/** Execute bulkWrite in bounded chunks. */
+const chunkedBulkWrite = async (
   ops: AnyBulkWriteOperation<ResourcePermissionType>[],
   session: ClientSession
 ) => {
@@ -323,22 +331,17 @@ export type MigrateDatasetResult = {
  * Migrate the collection permissions of a single Dataset inside one transaction
  *
  * 1. all Collections -> `inheritPermission=true`;
- * 2. build the Collection tree to detect cycles / orphans (normal tree is handled
- *    generically below; only abnormal data needs special-casing);
- * 3. create a creator (owner) permission record for every Collection (idempotent
- *    upsert on the `resource_permissions` unique key);
- * 4. call `syncRootCollectionFolders`: root inherited Collection Folders merge the
- *    Dataset effective clbs (owner→manage), then `syncChildrenPermission` propagates
- *    to every inherited descendant Folder, rebuilding all Folder snapshots with the
- *    same generic primitives used at runtime;
- * 5. orphan Folders are unreachable from any root -> merge the Dataset effective
- *    clbs directly (treated as roots);
- * 6. cyclic Folders are temporarily taken out of inheritance during the sync so
- *    `syncChildrenPermission` cannot loop forever, then restored; they keep only
- *    their owner record and are excluded from the migration version (a re-run after
- *    the cycle is fixed re-processes them);
- * 7. delete duplicate / wrongly-granted owner records and verify invariants;
- * 8. mark `permissionMigrationVersion` (skipping cyclic folders).
+ * 2. build the Collection tree to detect cycles / orphans;
+ * 3. create a creator (owner) permission record for every Collection (idempotent upsert);
+ * 4. `syncRootCollections`: 根级继承态 Collection 以 Dataset 有效 clbs 为父级来源重建完整快照
+ *    （Folder 与非 Folder 均写入），Folder 子 Collection 经递归以父 Folder 快照为父级来源
+ *    重建 —— 嵌套全快照模型；
+ * 5. orphan Collections（父级缺失/非 Folder）按根级处理：以 Dataset 有效 clbs 为父级来源
+ *    重建快照，Folder 继续递归子节点；
+ * 6. cyclic Folders 同步期间临时退出继承（防止递归死循环），同步后恢复；其快照保持 owner 记录，
+ *    不标记迁移版本（修复环后重跑会重新处理）；
+ * 7. 清理重复/错误授予的 owner 记录并校验不变式；
+ * 8. 标记 `permissionMigrationVersion`（跳过 cyclic folders）。
  */
 export const migrateDatasetCollections = async ({
   teamId,
@@ -368,7 +371,7 @@ export const migrateDatasetCollections = async ({
 
     const issues: string[] = [];
 
-    // 2. dataset effective clbs (root Collection Folder parent source)
+    // 2. dataset effective clbs (root / orphan Collection parent source)
     const dataset = await MongoDataset.findOne({ _id: datasetId, teamId })
       .lean<DatasetForMigration>()
       .session(session);
@@ -383,7 +386,6 @@ export const migrateDatasetCollections = async ({
     for (const cycleId of cycles) issues.push(`cycle: ${cycleId}`);
 
     // 4. create a creator (owner) permission record for every Collection
-    //    (幂等 upsert，resource_permissions 唯一键去重；重跑不会产生重复记录)
     const ownerUpsertOps: AnyBulkWriteOperation<ResourcePermissionType>[] = collections.map(
       (collection) => ({
         updateOne: {
@@ -400,7 +402,7 @@ export const migrateDatasetCollections = async ({
     );
     await chunkedBulkWrite(ownerUpsertOps, session);
 
-    // 5. cyclic folders temporarily opt out of inheritance so syncChildrenPermission
+    // 5. cyclic folders temporarily opt out of inheritance so the recursive sync
     //    cannot traverse the cycle forever (restored after the sync).
     if (cycles.length > 0) {
       await MongoDatasetCollection.updateMany(
@@ -410,20 +412,27 @@ export const migrateDatasetCollections = async ({
       );
     }
 
-    // 6. rebuild every inherited Collection Folder snapshot via the shared primitives:
-    //    root folders merge the Dataset effective clbs, children are propagated.
-    await syncRootCollectionFolders({ teamId, datasetId, rootClbs: datasetEffectiveClbs, session });
+    // 6. rebuild every inherited Collection snapshot via the shared full-snapshot primitives:
+    //    old/new parent clbs 都用 Dataset 有效 clbs —— 从现有快照中拆出自身 clbs 后再合并，
+    //    对 Folder 递归时以「父 Folder 旧快照 → 新快照」逐层重建（嵌套全快照）。
+    await syncRootCollections({
+      teamId,
+      datasetId,
+      oldRootClbs: datasetEffectiveClbs,
+      rootClbs: datasetEffectiveClbs,
+      session
+    });
 
-    // 7. orphan folders are not reachable from any root -> treat as roots and merge
-    //    the Dataset effective clbs directly.
+    // 7. orphan Collections are not reachable from any root -> treat as roots
+    //    (parent source = Dataset effective clbs); Folder orphans recurse their children.
     for (const orphanId of orphans) {
       const orphan = collections.find((c) => String(c._id) === orphanId);
-      if (!orphan || orphan.type !== DatasetCollectionTypeEnum.folder) continue;
-      await syncCollaborators({
-        resourceType: PerResourceTypeEnum.collection,
+      if (!orphan) continue;
+      await syncOrphanCollection({
         teamId,
-        resourceId: orphanId,
-        collaborators: datasetEffectiveClbs.map((clb) => ({ ...clb })),
+        datasetId,
+        collection: orphan,
+        datasetEffectiveClbs,
         session
       });
     }
@@ -440,16 +449,13 @@ export const migrateDatasetCollections = async ({
     // 9. cleanup duplicate / wrongly-granted owner records
     await cleanupOwnerRecords({ teamId, collections, session });
 
-    // 10. verify invariants: owner unique, all inherited, every inherited Folder
-    //     snapshot equals `merge(Dataset effective clbs, [own owner])` (flat model,
-    //     consistent with what syncRootCollectionFolders writes). Real inconsistencies
-    //     abort the batch (recorded in `failed`, re-processed on re-run); orphans/cycles
-    //     are expected edge cases already recorded above and are non-fatal.
+    // 10. verify invariants: owner unique, all inherited, every inherited Collection
+    //     snapshot is consistent with the nested model (merge(parent source, own clbs)).
     const nonInherited = collections.filter((c) => c.inheritPermission !== true);
     for (const c of nonInherited) issues.push(`inheritPermission != true: ${String(c._id)}`);
 
     const ownerValidation = await validateOwners({ teamId, collections, session });
-    const snapshotValidation = await validateFolderSnapshots({
+    const snapshotValidation = await validateCollectionSnapshots({
       teamId,
       collections,
       cycles,
@@ -485,6 +491,54 @@ export const migrateDatasetCollections = async ({
 
     return { migratedCollections, issues };
   });
+};
+
+/** 同步单个 orphan Collection：以 Dataset 有效 clbs 为父级来源重建快照；Folder 递归子节点。 */
+const syncOrphanCollection = async ({
+  teamId,
+  datasetId,
+  collection,
+  datasetEffectiveClbs,
+  session
+}: {
+  teamId: string;
+  datasetId: string;
+  collection: CollectionForMigration;
+  datasetEffectiveClbs: CollaboratorItemType[];
+  session: ClientSession;
+}) => {
+  const resourceId = String(collection._id);
+  const currentSnapshot = (await getResourceOwnedClbs({
+    resourceType: PerResourceTypeEnum.collection,
+    teamId,
+    resourceId,
+    session
+  })) as CollaboratorItemType[];
+
+  const ownClbs = deriveOwnClbs(currentSnapshot, datasetEffectiveClbs, String(collection.tmbId));
+  const newSnapshot = mergeCollaboratorList({
+    parentClbs: datasetEffectiveClbs,
+    childClbs: ownClbs
+  });
+
+  await syncCollectionCollaborators({
+    teamId,
+    resourceId,
+    parentClbs: datasetEffectiveClbs,
+    ownClbs,
+    session
+  });
+
+  if (collection.type === DatasetCollectionTypeEnum.folder) {
+    await syncCollectionChildrenPermission({
+      teamId,
+      datasetId,
+      parentId: resourceId,
+      oldParentClbs: currentSnapshot,
+      newParentClbs: newSnapshot,
+      session
+    });
+  }
 };
 
 /** Delete owner records that are duplicated or granted to someone other than the Collection owner. */
@@ -577,8 +631,14 @@ const validateOwners = async ({
   return issues;
 };
 
-/** Verify inherited Folder snapshots match the recomputed target snapshot (Dataset effective clbs + own owner). */
-const validateFolderSnapshots = async ({
+/**
+ * 校验所有继承态 Collection 的快照符合嵌套全快照模型：
+ * `快照 = merge(父级有效 clbs, 自身 clbs)`，其中
+ * - 根级 / orphan：父级有效 clbs = Dataset 有效 clbs；
+ * - 嵌套：父级有效 clbs = 父 Folder 的**实际快照**（迁移刚写入，从 clbsByResource 读取）。
+ * 自身 clbs 由 `deriveOwnClbs(实际快照, 父级有效 clbs)` 反推，验证实际快照是否为该模型的不动点。
+ */
+const validateCollectionSnapshots = async ({
   teamId,
   collections,
   cycles,
@@ -609,16 +669,33 @@ const validateFolderSnapshots = async ({
     clbsByResource.set(rid, arr);
   }
 
+  const idToCollection = new Map(collections.map((c) => [String(c._id), c]));
+  const isFolder = (c: CollectionForMigration) => c.type === DatasetCollectionTypeEnum.folder;
+
   for (const collection of collections) {
     const id = String(collection._id);
-    if (collection.type !== DatasetCollectionTypeEnum.folder || cycles.includes(id)) continue;
-    // flat 模型：syncRootCollectionFolders 对每个继承态 folder 写入的快照 =
-    // merge(Dataset 有效 clbs, [自身 owner])（父级 owner 封顶为 manage）
-    const expected = computeFolderSnapshot({ collection, parentClbs: datasetEffectiveClbs });
+    if (collection.inheritPermission !== true || cycles.includes(id)) continue;
+
+    // 父级有效 clbs：根级 / orphan → Dataset 有效；嵌套 → 父 Folder 的实际快照
+    let parentSource: CollaboratorItemType[];
+    if (!collection.parentId) {
+      parentSource = datasetEffectiveClbs;
+    } else {
+      const parent = idToCollection.get(String(collection.parentId));
+      if (parent && isFolder(parent)) {
+        parentSource = normalizeClbs(clbsByResource.get(String(parent._id)) ?? []);
+      } else {
+        // orphan：父级缺失/非 Folder，按根级处理
+        parentSource = datasetEffectiveClbs;
+      }
+    }
+
     const actual = normalizeClbs(clbsByResource.get(id) ?? []);
+    const ownClbs = deriveOwnClbs(actual, parentSource, String(collection.tmbId));
+    const expected = mergeCollaboratorList({ parentClbs: parentSource, childClbs: ownClbs });
     if (!sameClbs(expected, actual)) {
       issues.push(
-        `folder snapshot mismatch for ${id}: expected ${expected.length} clbs, got ${actual.length}`
+        `collection snapshot mismatch for ${id}: expected ${expected.length} clbs, got ${actual.length}`
       );
     }
   }
@@ -632,7 +709,7 @@ const validateFolderSnapshots = async ({
  * - Scans Datasets by `teamId + datasetId`, only those whose Collections are
  *   missing / behind `COLLECTION_PERMISSION_MIGRATION_VERSION` (idempotent, resume-safe);
  * - each Dataset is committed in its own `mongoSessionRun` transaction; a failing
- * Dataset is recorded and does not block the others (MG-005);
+ *   Dataset is recorded and does not block the others (MG-005);
  * - re-running after a failure re-processes only the un-migrated Datasets.
  */
 export const migrateCollectionPermissions = async (opts?: {
@@ -743,6 +820,8 @@ export const validateCollectionPermissionMigration = async (opts?: {
       : [];
 
     const { cycles } = buildCollectionTree(collections);
+    const idToCollection = new Map(collections.map((c) => [String(c._id), c]));
+    const isFolder = (c: CollectionForMigration) => c.type === DatasetCollectionTypeEnum.folder;
 
     const allClbs = await MongoResourcePermission.find({
       resourceType: PerResourceTypeEnum.collection,
@@ -766,34 +845,50 @@ export const validateCollectionPermissionMigration = async (opts?: {
       const id = String(collection._id);
       const actual = normalizeClbs(clbsByResource.get(id) ?? []);
 
-      if (collection.type === DatasetCollectionTypeEnum.folder && !cycles.includes(id)) {
-        // flat 模型：继承态 folder 快照 = merge(Dataset 有效 clbs, [自身 owner])
-        const expected = computeFolderSnapshot({
-          collection,
-          parentClbs: datasetEffectiveClbs
-        });
-        if (!sameClbs(expected, actual)) {
-          issues.push({
-            datasetId,
-            collectionId: id,
-            type: 'snapshot_mismatch',
-            detail: `expected ${expected.length} clbs, got ${actual.length}`
-          });
-        }
-      } else {
-        if (collection.inheritPermission !== true) {
-          issues.push({ datasetId, collectionId: id, type: 'non_inherited' });
-        }
+      if (collection.inheritPermission !== true) {
+        issues.push({ datasetId, collectionId: id, type: 'non_inherited' });
+      }
+      if (cycles.includes(id)) {
+        // cyclic folder：未迁移版本，只校验 owner
         const owners = actual.filter((c) => c.permission === OwnerRoleVal);
-        if (owners.length === 0) {
-          issues.push({ datasetId, collectionId: id, type: 'owner_missing' });
-        }
-        if (owners.length > 1 || owners.some((c) => c.tmbId !== String(collection.tmbId))) {
+        if (owners.length !== 1 || owners[0]?.tmbId !== String(collection.tmbId)) {
           issues.push({ datasetId, collectionId: id, type: 'owner_duplicate' });
         }
-        if (owners.some((c) => c.tmbId !== String(collection.tmbId))) {
-          issues.push({ datasetId, collectionId: id, type: 'wrong_owner_granted' });
+        continue;
+      }
+
+      // 嵌套模型：父级有效 clbs = 根级/orphan 用 Dataset 有效，嵌套用父 Folder 实际快照
+      let parentSource: CollaboratorItemType[];
+      if (!collection.parentId) {
+        parentSource = datasetEffectiveClbs;
+      } else {
+        const parent = idToCollection.get(String(collection.parentId));
+        if (parent && isFolder(parent)) {
+          parentSource = normalizeClbs(clbsByResource.get(String(parent._id)) ?? []);
+        } else {
+          parentSource = datasetEffectiveClbs;
         }
+      }
+      const ownClbs = deriveOwnClbs(actual, parentSource, String(collection.tmbId));
+      const expected = mergeCollaboratorList({ parentClbs: parentSource, childClbs: ownClbs });
+      if (!sameClbs(expected, actual)) {
+        issues.push({
+          datasetId,
+          collectionId: id,
+          type: 'snapshot_mismatch',
+          detail: `expected ${expected.length} clbs, got ${actual.length}`
+        });
+      }
+
+      const owners = actual.filter((c) => c.permission === OwnerRoleVal);
+      if (owners.length === 0) {
+        issues.push({ datasetId, collectionId: id, type: 'owner_missing' });
+      }
+      if (owners.length > 1 || owners.some((c) => c.tmbId !== String(collection.tmbId))) {
+        issues.push({ datasetId, collectionId: id, type: 'owner_duplicate' });
+      }
+      if (owners.some((c) => c.tmbId !== String(collection.tmbId))) {
+        issues.push({ datasetId, collectionId: id, type: 'wrong_owner_granted' });
       }
     }
   }

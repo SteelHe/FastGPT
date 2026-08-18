@@ -6,11 +6,11 @@ import {
   ReadRoleVal
 } from '@fastgpt/global/support/permission/constant';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
-import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import {
   computeEffectiveCollectionIdList,
   decideCollectionFilter
-} from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+} from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import { getFakeUsers } from '@test/datas/users';
 import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { createCollection, createDataset, addDatasetClb } from './helpers';
@@ -67,7 +67,8 @@ describe('scenario 11: RAG recall only includes readable collections', () => {
         inheritPermission: true
       });
 
-      // m1: dataset read (前置门槛) + collection read on c1 + folder snapshot read (inherits folderFile)
+      // m1: dataset read (前置门槛) + collection read on c1 + folder snapshot read；
+      // 全快照下继承态文件 folderFile 自身快照已含 folder 的有效权限（m1 read）
       await MongoResourcePermission.create({
         resourceType: PerResourceTypeEnum.dataset,
         teamId,
@@ -86,6 +87,13 @@ describe('scenario 11: RAG recall only includes readable collections', () => {
         resourceType: PerResourceTypeEnum.collection,
         teamId,
         resourceId: String(folder._id),
+        tmbId: m1,
+        permission: ReadRoleVal
+      });
+      await MongoResourcePermission.create({
+        resourceType: PerResourceTypeEnum.collection,
+        teamId,
+        resourceId: String(folderFile._id),
         tmbId: m1,
         permission: ReadRoleVal
       });

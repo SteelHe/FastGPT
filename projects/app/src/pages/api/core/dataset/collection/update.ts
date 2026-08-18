@@ -21,7 +21,7 @@ import { getI18nDatasetType } from '@fastgpt/service/support/user/audit/util';
 import { UpdateDatasetCollectionBodySchema } from '@fastgpt/global/openapi/core/dataset/collection/api';
 import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
 import { checkMoveFolderDepth } from '@fastgpt/service/common/parentFolder/depth';
-import { moveCollectionPermission } from '@fastgpt/service/support/permission/collection/move';
+import { moveCollectionPermission } from '@fastgpt/service/support/permission/collection/controller';
 
 // Set folder collection children forbid status
 const updateFolderChildrenForbid = async ({
@@ -78,8 +78,7 @@ async function handler(req: ApiRequestProps) {
     name,
     tags,
     forbid,
-    createTime,
-    inheritPermission
+    createTime
   } = parseApiInput({ req, bodySchema: UpdateDatasetCollectionBodySchema }).body;
   let id = parsedCollectionId;
 
@@ -134,8 +133,8 @@ async function handler(req: ApiRequestProps) {
     });
 
     if (isMove) {
-      // Move：inheritPermission 未传时保持原状态（collection.inheritPermission）；
-      // 显式 true 时继承新父级 clbs 并同步继承态子 Folder 快照；显式 false 时保持独立配置，仅更新 parentId。
+      // Move：不接收 inheritPermission 参数，保持 Collection 自身的继承关系不变——
+      // 原为继承态则继承新父级 clbs 并同步继承态子 Folder 快照；原为独立态则保持独立配置，仅更新 parentId。
       await moveCollectionPermission({
         collection: {
           _id: String(collection._id),
@@ -147,7 +146,7 @@ async function handler(req: ApiRequestProps) {
           inheritPermission: collection.inheritPermission
         },
         targetParentId: parentId,
-        inheritPermission: inheritPermission ?? collection.inheritPermission,
+        inheritPermission: collection.inheritPermission ?? true,
         session
       });
     }
@@ -159,12 +158,10 @@ async function handler(req: ApiRequestProps) {
       {
         $set: {
           // parentId 在 move 分支由 moveCollectionPermission 更新，避免重复写入
-          ...(!isMove && parentId !== undefined && { parentId: parentId || null }),
           ...(name && { name, updateTime: getCollectionUpdateTime({ name }) }),
           ...(collectionTags !== undefined && { tags: collectionTags }),
           ...(forbid !== undefined && { forbid }),
-          ...(createTime !== undefined && { createTime }),
-          ...(!isMove && inheritPermission !== undefined && { inheritPermission })
+          ...(createTime !== undefined && { createTime })
         }
       },
       {

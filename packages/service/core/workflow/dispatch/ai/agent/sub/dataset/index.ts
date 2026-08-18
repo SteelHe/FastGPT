@@ -27,7 +27,7 @@ import {
   createQueryExtensionChildNodeResponse
 } from '../../../../dataset/nodeResponse';
 import { filterDatasetsByTmbId } from '../../../../../../dataset/utils';
-import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import { normalizeDatasetSearchInput } from '../../../../dataset/utils';
 const logger = getLogger(LogCategories.MODULE.AI.AGENT);
 

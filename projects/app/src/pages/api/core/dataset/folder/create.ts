@@ -24,7 +24,7 @@ import {
 } from '@fastgpt/global/openapi/core/dataset/api';
 
 async function handler(req: ApiRequestProps<CreateDatasetFolderBody>) {
-  const { parentId, name, intro } = parseApiInput({
+  const { parentId, name, intro, inheritPermission } = parseApiInput({
     req,
     bodySchema: CreateDatasetFolderBodySchema
   }).body;
@@ -56,7 +56,8 @@ async function handler(req: ApiRequestProps<CreateDatasetFolderBody>) {
       intro,
       teamId,
       tmbId,
-      type: DatasetTypeEnum.folder
+      type: DatasetTypeEnum.folder,
+      inheritPermission
     });
 
     await createResourceDefaultCollaborators({

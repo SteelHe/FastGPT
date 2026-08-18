@@ -36,7 +36,10 @@ import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
 import { getI18nDatasetType } from '@fastgpt/service/support/user/audit/util';
 import { getEmbeddingModel, getLLMModel } from '@fastgpt/service/core/ai/model';
 import { computedCollectionChunkSettings } from '@fastgpt/global/core/dataset/training/utils';
-import { getResourceOwnedClbs } from '@fastgpt/service/support/permission/controller';
+import {
+  getDatasetEffectiveClbs,
+  getResourceOwnedClbs
+} from '@fastgpt/service/support/permission/controller';
 import { getS3AvatarSource } from '@fastgpt/service/common/s3/sources/avatar';
 import { isInternalAddress, PRIVATE_URL_TEXT } from '@fastgpt/service/common/system/utils';
 import { checkMoveFolderDepth } from '@fastgpt/service/common/parentFolder/depth';
@@ -67,7 +70,6 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
       externalReadUrl,
       apiDatasetServer,
       autoSync,
-      inheritPermission,
       chunkSettings: rawChunkSettings
     }
   } = parseApiInput({
@@ -229,7 +231,8 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
         ...(chunkSettings && { chunkSettings }),
         ...(intro !== undefined && { intro }),
         ...(externalReadUrl !== undefined && { externalReadUrl }),
-        ...(isMove && inheritPermission !== false && { inheritPermission: true }),
+        // move 时保持自身继承关系：原为继承态则继续继承新父级权限，原独立态则保持独立
+        ...(isMove && dataset.inheritPermission !== false && { inheritPermission: true }),
         ...(typeof autoSync === 'boolean' && { autoSync }),
         ...apiDatasetParams
       },
@@ -246,9 +249,16 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
 
   await mongoSessionRun(async (session) => {
     if (isMove) {
-      if (inheritPermission !== false) {
-        // inheritPermission=true（默认）：合并目标父 folder 权限并向下同步，
-        // 然后沿新的 Dataset 权限链同步其下继承态 Collection Folder 快照。
+      // move 时保持自身继承关系不变（不接收 inheritPermission 参数）：
+      // - 原为继承态：合并目标父 folder 权限并向下同步，然后沿新的 Dataset 权限链同步其下继承态 Collection 快照；
+      // - 原为独立态：仅更新 parentId，保留独立权限，不同步目标父级。
+      if (dataset.inheritPermission !== false) {
+        const oldRootClbs = await getDatasetEffectiveClbs({
+          teamId: dataset.teamId,
+          datasetId: id,
+          session
+        });
+
         const parentClbs = await getResourceOwnedClbs({
           teamId: dataset.teamId,
           resourceId: parentId,
@@ -273,7 +283,7 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
           session
         });
 
-        // Collection Folder 快照种子 = 被移动 Dataset 当前有效协作者（目标父级合并后）。
+        // Collection 快照种子 = 被移动 Dataset 当前有效协作者（目标父级合并后）。
         const rootClbs = await getResourceOwnedClbs({
           teamId: dataset.teamId,
           resourceId: id,
@@ -283,11 +293,12 @@ async function handler(req: ApiRequestProps<UpdateDatasetBody>) {
         await syncDatasetCollectionFolders({
           teamId: dataset.teamId,
           datasetId: id,
+          oldRootClbs,
           rootClbs,
           session
         });
       }
-      // inheritPermission=false：仅更新 parentId，保留独立权限，不同步目标父级。
+      // 原独立态：仅更新 parentId，保留独立权限，不同步目标父级。
       logDatasetMove({ tmbId, teamId, dataset, targetName });
       return onUpdate(session);
     } else {

@@ -11,7 +11,7 @@ import {
 } from '@fastgpt/global/support/permission/constant';
 import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
-import { moveCollectionPermission } from '@fastgpt/service/support/permission/collection/move';
+import { moveCollectionPermission } from '@fastgpt/service/support/permission/collection/controller';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { getFakeUsers } from '@test/datas/users';
 
@@ -189,14 +189,14 @@ describe('moveCollectionPermission ', { timeout: 120000 }, () => {
     expect(String(updatedC!.parentId)).toBe(f2Id);
     expect(updatedC!.inheritPermission).toBe(true);
 
-    // C snapshot = own clbs + target parent f2 clbs merged (sumPer keeps own owner and m1)
+    // C snapshot = own clbs + target parent f2 clbs merged（源父级 f1 的 m1 非自身配置，被剔除）
     const cClbs = clbMap(await getCollectionClbs(cId, teamId));
     expect(cClbs.get(owner)?.permission).toBe(OwnerRoleVal);
     expect(cClbs.get(m2)?.permission).toBe(WriteRoleVal);
-    expect(cClbs.get(m1)?.permission).toBe(ReadRoleVal); // 源父级 clbs 并入后保留（sumPer）
+    expect(cClbs.has(m1)).toBe(false);
 
-    // inherited child CC re-synced via syncChildrenPermission：新增 m2-write；
-    // m1 现在存在于父级 C 且不在最新快照中（保守删除条件满足）→ 删除
+    // inherited child CC re-synced via syncCollectionChildrenPermission：新增 m2-write，
+    // m1 已不在父级 C 新快照中且与旧父级权限一致 → 剔除
     const ccClbs = clbMap(await getCollectionClbs(ccId, teamId));
     expect(ccClbs.get(owner)?.permission).toBe(OwnerRoleVal);
     expect(ccClbs.get(m2)?.permission).toBe(WriteRoleVal);
@@ -335,10 +335,10 @@ describe('moveCollectionPermission ', { timeout: 120000 }, () => {
     expect(updatedC!.parentId).toBe(null);
     expect(updatedC!.inheritPermission).toBe(true);
 
-    // 根目录父级 = 所属 Dataset；本用例 Dataset 无 clbs（effective=[]），
-    // syncCollaborators 为空合并 → 自身 owner 与已有 clbs 全部保留
+    // 根目录父级 = 所属 Dataset；本用例 Dataset 无 clbs（effective=[]）→
+    // 源父级 f1 的 m1（非自身配置）被剔除，仅保留自身 owner
     const cClbs = clbMap(await getCollectionClbs(cId, teamId));
     expect(cClbs.get(owner)?.permission).toBe(OwnerRoleVal);
-    expect(cClbs.get(m1)?.permission).toBe(ReadRoleVal);
+    expect(cClbs.has(m1)).toBe(false);
   });
 });

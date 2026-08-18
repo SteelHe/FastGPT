@@ -1,5 +1,3 @@
-import type { CollectionPermissionItemType } from '../../../../support/permission/collection/type';
-
 /**
  * 平铺结果：
  * - `visibleIdsByParentId`：展示父级（虚拟 parentId，`null` 用空字符串 `''` 表示 Dataset 根目录）
@@ -9,6 +7,13 @@ import type { CollectionPermissionItemType } from '../../../../support/permissio
 export type FlattenResult = {
   visibleIdsByParentId: Map<string, string[]>;
   total: number;
+};
+
+/** 平铺函数所需的节点最小字段：仅读取 `_id` 与 `parentId`，Dataset 与 Collection 均可复用。 */
+export type FlattenItemType = {
+  _id: unknown;
+  /** schema 中为可选字段，函数内通过 truthiness 归一化（缺省视为根）。 */
+  parentId?: unknown;
 };
 
 type FlattenNode = {
@@ -23,8 +28,8 @@ const ROOT_KEY = '';
 
 /**
  * 内存构建平铺层级（自顶向下一次遍历、O(N)）：
- * - 输入为当前 Dataset 下**全部** Collection（含不可读节点）与已解析的可读 ID 集合 R；
- * - 维护“最近可读祖先” `nearestVisible`，初始为 Dataset 根（null）；
+ * - 输入为当前范围内的**全部**节点（含不可读节点）与已解析的可读 ID 集合 R；
+ * - 维护“最近可读祖先” `nearestVisible`，初始为根（null）；
  * - 可读节点：展示父级 = `nearestVisible`，随后以自身作为其子节点的 `nearestVisible`；
  * - 不可读节点：不参与展示，其下可读子孙提升到当前的 `nearestVisible`，跳过无权限中间 Folder；
  * - 每个节点只被访问一次，不随目录深度退化为 O(N × D)，也无需向上逐级回溯。
@@ -32,7 +37,7 @@ const ROOT_KEY = '';
  * 返回结果不暴露不可见父级的路径/名称；`_id` 映射基于 `String()` 归一化。
  */
 export function buildFlattenedCollectionList(
-  collections: CollectionPermissionItemType[],
+  collections: FlattenItemType[],
   readableIds: string[],
   targetParentId: string | null
 ): FlattenResult {

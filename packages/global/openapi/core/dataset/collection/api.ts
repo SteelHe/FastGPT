@@ -41,7 +41,6 @@ export type ScrollCollectionsBodyType = z.infer<typeof ScrollCollectionsBodySche
 export const UpdateDatasetCollectionBodySchema = z.object({
   id: ObjectIdSchema.optional().describe('集合ID，与 datasetId+externalFileId 二选一'),
   parentId: ParentIdSchema.describe('父级目录ID'),
-  inheritPermission: z.boolean().optional().describe('是否继承父级权限，默认 true'),
   name: z.string().optional().describe('集合名称'),
   tags: z.array(z.string()).optional().describe('标签列表（标签名称，非ID）'),
   forbid: z.boolean().optional().describe('是否禁用'),

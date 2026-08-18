@@ -161,7 +161,17 @@ describe('scenario 3: move a dataset to a folder with a different collaborator',
           resourceType: PerResourceTypeEnum.dataset,
           session
         });
-        await syncDatasetCollectionFolders({ teamId, datasetId: String(d._id), rootClbs, session });
+        await syncDatasetCollectionFolders({
+          teamId,
+          datasetId: String(d._id),
+          // 移动前 D 有效 = merge(A 链[owner, m1], D own[owner])
+          oldRootClbs: [
+            { tmbId: ownerTmb, permission: OwnerRoleVal },
+            { tmbId: m1, permission: ReadRoleVal }
+          ],
+          rootClbs,
+          session
+        });
       });
 
       const dDoc = await MongoDataset.findById(d._id).lean();
@@ -176,10 +186,10 @@ describe('scenario 3: move a dataset to a folder with a different collaborator',
         authDatasetByTmbId({ tmbId: m2, datasetId: String(d._id), per: ReadPermissionVal })
       ).resolves.toBeDefined();
 
-      // CF1 snapshot reseeded via syncCollaborators（并入不删除）：新增 m2 read，旧 m1 read 保留
+      // CF1 snapshot reseeded via 全快照（deriveOwnClbs + merge）：新增 m2 read，旧 m1 read（继承自 A）被剔除
       const cf1Map = await snapshotMap(teamId, String(cf1._id));
       expect(cf1Map.get(m2)).toBe(ReadRoleVal);
-      expect(cf1Map.get(m1)).toBe(ReadRoleVal);
+      expect(cf1Map.has(m1)).toBe(false);
       expect(cf1Map.get(ownerTmb)).toBe(OwnerRoleVal);
     },
     TIMEOUT
@@ -358,7 +368,17 @@ describe('scenario 4: move a folder with a sub-folder and a dataset', () => {
           resourceType: PerResourceTypeEnum.dataset,
           session
         });
-        await syncDatasetCollectionFolders({ teamId, datasetId: String(f._id), rootClbs, session });
+        await syncDatasetCollectionFolders({
+          teamId,
+          datasetId: String(f._id),
+          // 移动前 F 有效 = merge(A 链[owner, m1], F own[owner, m1])
+          oldRootClbs: [
+            { tmbId: ownerTmb, permission: OwnerRoleVal },
+            { tmbId: m1, permission: ReadRoleVal }
+          ],
+          rootClbs,
+          session
+        });
       });
 
       // SF (child dataset folder) snapshot re-synced to B's clbs: m2 read present, m1 removed

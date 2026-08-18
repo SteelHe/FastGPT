@@ -25,10 +25,10 @@ vi.mock('@fastgpt/service/core/dataset/search', () => ({
 }));
 
 vi.mock(
-  '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection',
+  '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection')
+      typeof import('@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission')
     >()),
     resolveReadableCollectionIds: resolveReadableCollectionIdsMock
   })

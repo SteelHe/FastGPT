@@ -1,8 +1,10 @@
-import { createCollectionAndInsertData } from '@fastgpt/service/core/dataset/collection/controller';
+import {
+  createCollectionAndInsertData,
+  delCollection
+} from '@fastgpt/service/core/dataset/collection/controller';
 import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
 import { NextAPI } from '@/service/middleware/entry';
 import { type ApiRequestProps } from '@fastgpt/next/type';
-import { delCollection } from '@fastgpt/service/core/dataset/collection/controller';
 import { authDatasetCollection } from '@fastgpt/service/support/permission/dataset/auth';
 import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
 import { addAuditLog } from '@fastgpt/service/support/user/audit/util';

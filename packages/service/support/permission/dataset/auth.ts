@@ -18,7 +18,7 @@ import {
 import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
 import { DatasetPermission } from '@fastgpt/global/support/permission/dataset/controller';
 import { CollectionPermission } from '@fastgpt/global/support/permission/collection/controller';
-import { resolveCollectionPermission } from '../collection/resolvePermission';
+import { resolveCollectionPermission } from '../collection/auth';
 import { getCollectionWithDataset } from '../../../core/dataset/controller';
 import { MongoDatasetData } from '../../../core/dataset/data/schema';
 import { type AuthModeType, type AuthResponseType } from '../type';

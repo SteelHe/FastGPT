@@ -471,12 +471,16 @@ describe.sequential('Collection Folder snapshot sync ', () => {
     ]);
 
     // parent collaborators no longer include member1 -> root snapshot drops member1;
-    // 通用 syncChildrenPermission 保守删除：子 folder 的 member1 与父快照（已无 member1）不一致，
-    // 不满足删除条件，因此子 folder 保留原 member1-read（与 dataset folder 行为一致）。
+    // 全快照模型：从旧有效 clbs 拆出自身 clbs 后与新有效合并，根/子 folder 的 member1
+    // 均为继承贡献，被一并剔除。
     await mongoSessionRun(async (session) => {
       await syncDatasetCollectionFolders({
         teamId,
         datasetId,
+        oldRootClbs: [
+          { tmbId: ownerTmb, permission: OwnerRoleVal },
+          { tmbId: memberTmb, permission: ReadRoleVal }
+        ],
         rootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
         session
       });
@@ -493,10 +497,10 @@ describe.sequential('Collection Folder snapshot sync ', () => {
 
     const cf1Map = await snapshotOf(String(cf1._id));
     const cf2Map = await snapshotOf(String(cf2._id));
-    // 根 folder：syncCollaborators 只并入不删除，保留原 member1-read
-    expect(cf1Map.get(memberTmb)).toBe(ReadRoleVal);
+    // 根 folder：member1 已不在新有效 clbs 且与旧父级一致 → 剔除
+    expect(cf1Map.has(memberTmb)).toBe(false);
     expect(cf1Map.get(ownerTmb)).toBe(OwnerRoleVal);
-    // 子 folder：syncChildrenPermission 保守删除（member1 不在根列表且权限与父一致）→ 移除
+    // 子 folder：父级新快照同样不含 member1 → 剔除
     expect(cf2Map.has(memberTmb)).toBe(false);
     expect(cf2Map.get(ownerTmb)).toBe(OwnerRoleVal);
   });
@@ -547,12 +551,16 @@ describe.sequential('Collection Folder snapshot sync ', () => {
       }
     ]);
 
-    // parent upgraded member1 read -> write; 通用 syncChildrenPermission sumPer：
-    // 根快照替换为 write，子 folder 的 member1 由 read sumPer write = 0b110
+    // parent upgraded member1 read -> write; 全快照模型：根/子 folder 的 member1
+    // 从旧有效 clbs 拆出（非自身配置）后，与新父级 write 合并 → 精确 write（非 sumPer 叠加）
     await mongoSessionRun(async (session) => {
       await syncDatasetCollectionFolders({
         teamId,
         datasetId,
+        oldRootClbs: [
+          { tmbId: ownerTmb, permission: OwnerRoleVal },
+          { tmbId: memberTmb, permission: ReadRoleVal }
+        ],
         rootClbs: [
           { tmbId: ownerTmb, permission: OwnerRoleVal },
           { tmbId: memberTmb, permission: WriteRoleVal }
@@ -572,9 +580,9 @@ describe.sequential('Collection Folder snapshot sync ', () => {
 
     const cf1Map = await snapshotOf(String(cf1._id));
     const cf2Map = await snapshotOf(String(cf2._id));
-    // syncCollaborators sumPer：根 folder 的 member1 = 原 read | 父 write = 0b110
-    expect(cf1Map.get(memberTmb)).toBe(WriteRoleVal | ReadRoleVal);
-    expect(cf2Map.get(memberTmb)).toBe(WriteRoleVal | ReadRoleVal);
+    // member1 为继承贡献，新快照精确为 write
+    expect(cf1Map.get(memberTmb)).toBe(WriteRoleVal);
+    expect(cf2Map.get(memberTmb)).toBe(WriteRoleVal);
     expect(cf1Map.get(ownerTmb)).toBe(OwnerRoleVal);
     expect(cf2Map.get(ownerTmb)).toBe(OwnerRoleVal);
   });

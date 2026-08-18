@@ -11,7 +11,7 @@ import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
 import { retryFn } from '@fastgpt/global/common/system/utils';
 import { UserError } from '@fastgpt/global/common/error/utils';
 import { getS3DatasetSource } from '../../common/s3/sources/dataset';
-import { deleteCollectionPermissions } from '../../support/permission/collection/cleanup';
+import { deleteCollectionPermissions } from '../../support/permission/collection/controller';
 
 /* ============= dataset ========== */
 /* find all datasetId by top datasetId */

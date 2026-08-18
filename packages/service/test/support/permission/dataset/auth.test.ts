@@ -205,15 +205,15 @@ describe('authDatasetCollection', () => {
     expect(result.permission.checkPer(ReadPermissionVal)).toBe(true);
   });
 
-  it('allows an inherited collection that is readable via its parent folder snapshot', async () => {
+  it('allows an inherited collection that is readable via its own full snapshot', async () => {
     mockGetTmbInfoByTmbId.mockResolvedValue({
       teamId: 'team-a',
       permission: { isOwner: false }
     });
     mockGetTmbPermission.mockImplementation(async ({ resourceId }: any) => {
       if (String(resourceId) === datasetId) return ReadRoleVal; // dataset read
-      if (String(resourceId) === parentFolderId) return ReadRoleVal; // parent folder snapshot
-      return 0; // no own collection record
+      if (String(resourceId) === collectionId) return ReadRoleVal; // collection full snapshot (parent merged in)
+      return 0;
     });
     mockDatasetQuery({
       _id: datasetId,
@@ -241,14 +241,14 @@ describe('authDatasetCollection', () => {
     expect(result.collection._id).toBe(collectionId);
   });
 
-  it('caps parent owner to manage at the auth level (owner not passed through)', async () => {
+  it('caps parent owner to manage at the snapshot write (owner not passed through)', async () => {
     mockGetTmbInfoByTmbId.mockResolvedValue({
       teamId: 'team-a',
       permission: { isOwner: false }
     });
     mockGetTmbPermission.mockImplementation(async ({ resourceId }: any) => {
       if (String(resourceId) === datasetId) return ReadRoleVal; // dataset read
-      if (String(resourceId) === parentFolderId) return OwnerRoleVal; // user owns parent folder
+      if (String(resourceId) === collectionId) return ManageRoleVal; // collection snapshot stores parent owner as manage
       return 0;
     });
     mockDatasetQuery({

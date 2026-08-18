@@ -10,11 +10,11 @@ import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
 import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { filterDatasetsByTmbId } from '@fastgpt/service/core/dataset/utils';
-import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import {
   computeEffectiveCollectionIdList,
   decideCollectionFilter
-} from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+} from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import { getFakeUsers } from '@test/datas/users';
 
 /**
@@ -175,7 +175,19 @@ describe('resolveReadableCollectionIds ', () => {
         inheritPermission: true
       });
 
-      // member1: dataset read（前置门槛）→ 全部根级继承态文件可读
+      // member1: dataset read（前置门槛）→ 全快照下每个文件快照已含 dataset 有效权限（member read）
+      const fileIds = (await MongoDatasetCollection.find({ teamId, datasetId }, '_id').lean()).map(
+        (c) => String(c._id)
+      );
+      await MongoResourcePermission.insertMany(
+        fileIds.map((resourceId) => ({
+          resourceType: PerResourceTypeEnum.collection,
+          teamId,
+          resourceId,
+          tmbId: users.members[0].tmbId,
+          permission: ReadRoleVal
+        }))
+      );
       await MongoResourcePermission.create({
         resourceType: PerResourceTypeEnum.dataset,
         teamId,
@@ -287,7 +299,7 @@ describe('resolveReadableCollectionIds ', () => {
         inheritPermission: false
       });
 
-      // member1: dataset read + folder 快照 read → 继承态文件 c1 可读
+      // member1: dataset read + folder 快照 read；全快照下继承态文件 c1 自身快照也含 member read
       await MongoResourcePermission.create({
         resourceType: PerResourceTypeEnum.dataset,
         teamId,
@@ -299,6 +311,13 @@ describe('resolveReadableCollectionIds ', () => {
         resourceType: PerResourceTypeEnum.collection,
         teamId,
         resourceId: String(folder._id),
+        tmbId: users.members[0].tmbId,
+        permission: ReadRoleVal
+      });
+      await MongoResourcePermission.create({
+        resourceType: PerResourceTypeEnum.collection,
+        teamId,
+        resourceId: String(c1._id),
         tmbId: users.members[0].tmbId,
         permission: ReadRoleVal
       });

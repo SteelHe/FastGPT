@@ -53,7 +53,8 @@ async function handler(req: ApiRequestProps): Promise<CreateDatasetWithFilesResp
     avatar,
     vectorModel = getDefaultEmbeddingModel()?.model,
     agentModel = getDefaultLLMModel()?.model,
-    vlmModel = getDefaultVLMModel()?.model
+    vlmModel = getDefaultVLMModel()?.model,
+    inheritPermission
   } = datasetParams;
 
   const { teamId, tmbId, userId } = parentId
@@ -89,7 +90,8 @@ async function handler(req: ApiRequestProps): Promise<CreateDatasetWithFilesResp
             vlmModel,
             avatar,
             intro: '',
-            type: DatasetTypeEnum.dataset
+            type: DatasetTypeEnum.dataset,
+            inheritPermission
           }
         ],
         { session, ordered: true }

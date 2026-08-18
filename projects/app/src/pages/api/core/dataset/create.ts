@@ -43,7 +43,8 @@ async function handler(req: ApiRequestProps): Promise<CreateDatasetResponse> {
     vectorModel = getDefaultEmbeddingModel()?.model,
     agentModel = getDatasetModel()?.model,
     vlmModel = getDefaultVLMModel()?.model,
-    apiDatasetServer
+    apiDatasetServer,
+    inheritPermission
   } = parseApiInput({ req, bodySchema: CreateDatasetBodySchema }).body;
 
   // auth
@@ -89,7 +90,8 @@ async function handler(req: ApiRequestProps): Promise<CreateDatasetResponse> {
           vlmModel,
           avatar,
           type,
-          apiDatasetServer
+          apiDatasetServer,
+          inheritPermission
         }
       ],
       { session, ordered: true }

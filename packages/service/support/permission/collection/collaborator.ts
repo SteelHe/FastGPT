@@ -1,20 +1,18 @@
 import { MongoDatasetCollection } from '../../../core/dataset/collection/schema';
 import { getDatasetEffectiveClbs, getResourceOwnedClbs } from '../controller';
-import { syncChildrenPermission, syncCollaborators } from '../inheritPermission';
 import { mongoSessionRun } from '../../../common/mongo/sessionRun';
 import { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
-import { OwnerRoleVal, PerResourceTypeEnum } from '@fastgpt/global/support/permission/constant';
+import { PerResourceTypeEnum } from '@fastgpt/global/support/permission/constant';
 import { mergeCollaboratorList } from '@fastgpt/global/support/permission/utils';
 import type { DatasetCollectionSchemaType } from '@fastgpt/global/core/dataset/type';
+import type { CollaboratorItemType } from '@fastgpt/global/support/permission/collaborator';
+import { syncCollectionChildrenPermission, syncCollectionCollaborators } from './folderSync';
 
 /**
- * Resume a Collection's inherited permission
- * - non-folder: only set `inheritPermission=true`; its effective permission is
- *   dynamically merged at auth time, no snapshot is written;
- * - folder: merge the parent clbs into its own snapshot via `syncCollaborators`
- *   (owner->manage, sumPer keeps the own owner and any independent clbs), set
- *   `inheritPermission=true`, and re-sync inherited descendant Folders through
- *   `syncChildrenPermission` (sumPer). Non-inherited descendants are never overwritten.
+ * Resume a Collection's inherited permission（全快照模型）
+ * - 所有类型（Folder / 非 Folder）：加载当前快照（独立态时即自身 clbs），与父级有效 clbs
+ *   合并为完整有效快照并写入（`syncCollectionCollaborators`），置 `inheritPermission=true`；
+ * - 若目标是 Folder，用「旧快照 → 新快照」递归同步其继承态子 Collection。
  */
 export async function resumeCollectionInheritPermission({
   collection,
@@ -28,15 +26,9 @@ export async function resumeCollectionInheritPermission({
 }): Promise<void> {
   const collectionId = String(collection._id);
 
-  if (collection.type !== DatasetCollectionTypeEnum.folder) {
-    await MongoDatasetCollection.updateOne({ _id: collection._id }, { inheritPermission: true });
-    return;
-  }
-
   await mongoSessionRun(async (session) => {
-    // 1. parent effective clbs: parent Collection Folder snapshot, or the root
-    //    Dataset effective collaborators (walk up the dataset folder chain)
-    const parentClbs = collection.parentId
+    // 1. 父级有效 clbs：父 Collection Folder 快照，或根级 Collection 的 Dataset 有效 clbs
+    const parentClbs: CollaboratorItemType[] = collection.parentId
       ? await getResourceOwnedClbs({
           resourceType: PerResourceTypeEnum.collection,
           teamId,
@@ -49,39 +41,45 @@ export async function resumeCollectionInheritPermission({
           session
         });
 
-    // 2. 将父级 clbs 并入自身快照（owner→manage，sumPer 保留自身独立 clbs 与 owner）
-    await syncCollaborators({
+    // 2. 当前快照（独立态时即自身 clbs）
+    const currentSnapshot = (await getResourceOwnedClbs({
       resourceType: PerResourceTypeEnum.collection,
       teamId,
       resourceId: collectionId,
-      // syncCollaborators 会原地把入参 owner 改为 manage，传副本避免污染 parentClbs
-      collaborators: parentClbs.map((clb) => ({ ...clb })),
+      session
+    })) as CollaboratorItemType[];
+
+    // 3. 完整有效快照 = merge(父级, 当前)
+    const newSnapshot = mergeCollaboratorList({
+      parentClbs,
+      childClbs: currentSnapshot
+    });
+
+    await syncCollectionCollaborators({
+      teamId,
+      resourceId: collectionId,
+      parentClbs,
+      ownClbs: currentSnapshot,
       session
     });
 
-    // 3. resume inheritance
+    // 4. resume inheritance
     await MongoDatasetCollection.updateOne(
       { _id: collection._id },
       { inheritPermission: true },
       { session }
     );
 
-    // 4. re-sync inherited descendant folders via the generic syncChildrenPermission
-    await syncChildrenPermission({
-      resource: {
-        _id: collectionId,
-        type: DatasetCollectionTypeEnum.folder,
+    // 5. 若目标是 Folder，递归同步继承态子 Collection（旧快照 → 新快照）
+    if (collection.type === DatasetCollectionTypeEnum.folder) {
+      await syncCollectionChildrenPermission({
         teamId,
-        parentId: collection.parentId ? String(collection.parentId) : null
-      },
-      folderTypeList: [DatasetCollectionTypeEnum.folder],
-      resourceType: PerResourceTypeEnum.collection,
-      resourceModel: MongoDatasetCollection,
-      session,
-      collaborators: mergeCollaboratorList({
-        parentClbs,
-        childClbs: [{ tmbId: String(collection.tmbId), permission: OwnerRoleVal }]
-      })
-    });
+        datasetId: String(collection.datasetId),
+        parentId: collectionId,
+        oldParentClbs: currentSnapshot,
+        newParentClbs: newSnapshot,
+        session
+      });
+    }
   });
 }

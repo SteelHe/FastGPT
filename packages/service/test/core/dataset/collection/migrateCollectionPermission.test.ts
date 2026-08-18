@@ -304,10 +304,14 @@ describe('migrateDatasetCollections ', () => {
       { tmbId: memberTmbId, permission: OwnerRoleVal }
     ]);
 
-    // C1: normal collection -> unique owner record only, no full parent snapshot
+    // C1: normal collection -> full snapshot = merge(Dataset 有效 clbs, 自身 owner)
+    // （全快照模型；Dataset 有效 = [owner:Owner, member:Read]，C1 owner = member）
     const c1Clbs = await getCollectionClbs(teamId, C1);
-    expect(c1Clbs).toHaveLength(1);
-    expectClbsEqual(c1Clbs, [{ tmbId: memberTmbId, permission: OwnerRoleVal }]);
+    expect(c1Clbs).toHaveLength(2);
+    expectClbsEqual(c1Clbs, [
+      { tmbId: ownerTmbId, permission: ManageRoleVal },
+      { tmbId: memberTmbId, permission: OwnerRoleVal }
+    ]);
 
     // All migrated collections marked with the version
     const cols = await MongoDatasetCollection.find({ datasetId, teamId }).lean();

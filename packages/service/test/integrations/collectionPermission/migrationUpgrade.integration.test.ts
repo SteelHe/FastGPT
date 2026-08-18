@@ -23,7 +23,7 @@ import { createDataset, snapshotMap } from './helpers';
  * scenario 10 / TS-005: 升级存量权限+ 幂等重跑断言。
  *
  * D 下根 Folder F1、子 Folder F2、普通 C1：
- * - F1/F2 获得正确父级快照；F1/F2/C1 均存在唯一 owner 记录；C1 不复制完整父级快照；
+ * - F1/F2/C1 均获得 `merge(父级有效 clbs, 自身 clbs)` 完整快照，且各自存在唯一 owner 记录；
  * - 迁移后成员按新权限可读（端到端鉴权）；
  * - 重跑幂等（migratedDatasets=0，权限记录数不变）。
  */
@@ -126,9 +126,12 @@ describe('scenario 10 + TS-005: legacy permission migration and idempotent re-ru
       expect(f2Map.get(m1)).toBe(ReadRoleVal);
       expect(f2Map.get(m2)).toBe(OwnerRoleVal); // F2 own owner
 
-      // C1 (normal collection): unique owner only, no full parent snapshot
+      // C1 (normal collection): full snapshot = merge(Dataset 有效 clbs, 自身 owner)
+      // D 有效 = [owner:Owner, m1:Read]，C1 owner = m2 → [owner:Manage, m1:Read, m2:Owner]
       const c1Map = await snapshotMap(teamId, C1);
-      expect(c1Map.size).toBe(1);
+      expect(c1Map.size).toBe(3);
+      expect(c1Map.get(ownerTmb)).toBe(ManageRoleVal);
+      expect(c1Map.get(m1)).toBe(ReadRoleVal);
       expect(c1Map.get(m2)).toBe(OwnerRoleVal);
 
       // unique owner per collection (exactly one OwnerRoleVal record each)

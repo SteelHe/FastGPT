@@ -22,6 +22,8 @@ import {
   resumeInheritPermission,
   syncChildrenPermission
 } from '@fastgpt/service/support/permission/inheritPermission';
+import { getResourceOwnedClbs } from '@fastgpt/service/support/permission/controller';
+import { mergeCollaboratorList } from '@fastgpt/global/support/permission/utils';
 import { getFakeUsers } from '@test/datas/users';
 import { addDatasetClb, createCollection, createDataset, snapshotMap } from './helpers';
 
@@ -129,6 +131,7 @@ describe('scenario 1: changing a folder collaborator propagates to folder / data
         await syncDatasetCollectionFolders({
           teamId,
           datasetId: String(f1._id),
+          oldRootClbs: [{ tmbId: ownerTmb, permission: OwnerRoleVal }],
           rootClbs: newF1Clbs,
           session
         });
@@ -394,13 +397,35 @@ describe('scenario 5: resuming inheritance merges parent + own and syncs collect
         authDatasetByTmbId({ tmbId: m2, datasetId: String(f._id), per: ReadPermissionVal })
       ).resolves.toBeDefined();
 
-      // resume F inheritance (folder, with Collection Folder sync)
-      await resumeInheritPermission({
-        resource: f,
-        folderTypeList: [DatasetTypeEnum.folder],
+      // resume F inheritance (folder, with Collection snapshot sync)
+      const oldRootClbs = await getResourceOwnedClbs({
         resourceType: PerResourceTypeEnum.dataset,
-        resourceModel: MongoDataset,
-        syncCollectionFolders: true
+        teamId,
+        resourceId: String(f._id)
+      });
+      const parentClbs = await getResourceOwnedClbs({
+        resourceType: PerResourceTypeEnum.dataset,
+        teamId,
+        resourceId: String(parent._id)
+      });
+      const rootClbs = mergeCollaboratorList({ parentClbs, childClbs: oldRootClbs });
+
+      await mongoSessionRun(async (session) => {
+        await resumeInheritPermission({
+          resource: f,
+          folderTypeList: [DatasetTypeEnum.folder],
+          resourceType: PerResourceTypeEnum.dataset,
+          resourceModel: MongoDataset,
+          session
+        });
+        // 全快照：恢复继承后以旧/新有效 clbs 重建继承态 Collection 快照
+        await syncDatasetCollectionFolders({
+          teamId,
+          datasetId: String(f._id),
+          oldRootClbs,
+          rootClbs,
+          session
+        });
       });
 
       // F merged parent (m1 read) + own (m2 write) + own owner

@@ -15,7 +15,7 @@ import { createOneCollection } from '@fastgpt/service/core/dataset/collection/co
 import {
   createCollectionPermission,
   getCollectionCreateParentClbs
-} from '@fastgpt/service/support/permission/collection/create';
+} from '@fastgpt/service/support/permission/collection/controller';
 import { getDatasetEffectiveClbs } from '@fastgpt/service/support/permission/controller';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { getFakeUsers } from '@test/datas/users';
@@ -41,7 +41,7 @@ const clbMap = (clbs: Awaited<ReturnType<typeof getCollectionClbs>>) =>
   );
 
 describe('createCollectionPermission ', { timeout: 120000 }, () => {
-  it('CM-001: non-folder with default inheritPermission=true writes only the owner record, no parent snapshot', async () => {
+  it('CM-001: non-folder with default inheritPermission=true writes full snapshot = parent clbs + own owner', async () => {
     const users = await getFakeUsers(1);
     const teamId = users.owner.teamId;
     const datasetId = oid();
@@ -69,9 +69,11 @@ describe('createCollectionPermission ', { timeout: 120000 }, () => {
     });
 
     const clbs = await getCollectionClbs(collectionId, teamId);
-    expect(clbs).toHaveLength(1);
-    expect(String(clbs[0].tmbId)).toBe(String(users.owner.tmbId));
-    expect(clbs[0].permission).toBe(OwnerRoleVal);
+    const map = clbMap(clbs);
+    // 全快照：parent clbs（owner→manage 由 mergeCollaboratorList 处理）+ 自身 owner
+    expect(clbs).toHaveLength(2);
+    expect(map.get(String(users.owner.tmbId))?.permission).toBe(OwnerRoleVal);
+    expect(map.get(String(users.members[0].tmbId))?.permission).toBe(ReadRoleVal);
   });
 
   it('CM-002: folder with inheritPermission=true writes snapshot = parent clbs (owner->manage) + own owner', async () => {
@@ -366,7 +368,7 @@ describe('createOneCollection integration ', { timeout: 120000 }, () => {
     expect(collection.inheritPermission).toBe(true);
   });
 
-  it('creates a non-folder collection with only the owner record (no dataset snapshot copy)', async () => {
+  it('creates a non-folder collection with a full snapshot from the dataset clbs', async () => {
     const users = await getFakeUsers(2);
     const teamId = users.owner.teamId;
     const dataset = await createDataset({ teamId, tmbId: String(users.owner.tmbId) });
@@ -389,9 +391,11 @@ describe('createOneCollection integration ', { timeout: 120000 }, () => {
     });
 
     const clbs = await getCollectionClbs(String(collection._id), teamId);
-    expect(clbs).toHaveLength(1);
-    expect(String(clbs[0].tmbId)).toBe(String(users.owner.tmbId));
-    expect(clbs[0].permission).toBe(OwnerRoleVal);
+    const map = clbMap(clbs);
+    // 全快照：dataset clbs + 自身 owner
+    expect(clbs).toHaveLength(2);
+    expect(map.get(String(users.owner.tmbId))?.permission).toBe(OwnerRoleVal);
+    expect(map.get(String(users.members[0].tmbId))?.permission).toBe(ReadRoleVal);
   });
 
   it('creates a folder under a parent collection folder, snapshot comes from the parent folder snapshot', async () => {
@@ -435,7 +439,7 @@ describe('createOneCollection integration ', { timeout: 120000 }, () => {
     expect(String(childFolder.parentId)).toBe(String(parentFolder._id));
   });
 
-  it('non-folder collection under a parent folder only gets the owner record (no parent folder snapshot)', async () => {
+  it('non-folder collection under a parent folder gets a full snapshot from the parent folder snapshot', async () => {
     const users = await getFakeUsers(2);
     const teamId = users.owner.teamId;
     const dataset = await createDataset({ teamId, tmbId: String(users.owner.tmbId) });
@@ -467,8 +471,10 @@ describe('createOneCollection integration ', { timeout: 120000 }, () => {
     });
 
     const clbs = await getCollectionClbs(String(collection._id), teamId);
-    expect(clbs).toHaveLength(1);
-    expect(String(clbs[0].tmbId)).toBe(String(users.owner.tmbId));
-    expect(clbs[0].permission).toBe(OwnerRoleVal);
+    const map = clbMap(clbs);
+    // 全快照：父 Folder 快照（owner + member1 read）+ 自身 owner
+    expect(clbs).toHaveLength(2);
+    expect(map.get(String(users.owner.tmbId))?.permission).toBe(OwnerRoleVal);
+    expect(map.get(String(users.members[0].tmbId))?.permission).toBe(ReadRoleVal);
   });
 });

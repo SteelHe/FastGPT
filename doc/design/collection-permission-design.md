@@ -18,8 +18,8 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度到 `
 1. 实现 collection 级别的独立权限配置（协作者、继承/非继承状态）。
 2. 默认继承父级权限，显式非继承的资源仅使用自身权限。
 3. 文件列表仅展示当前用户有权限的 collection。
-4. 无权限文件夹下的有权限内容可平铺展示，隐藏完整路径。
-5. 知识库列表搜索限定当前路径，不全局搜索。
+4. 无权限文件夹下的有权限内容可平铺展示，隐藏完整路径（**Dataset 列表与 Collection 列表均适用**）。
+5. 知识库 / 文件列表搜索限定当前可见范围，不全局搜索。
 6. 知识库检索（RAG 召回）按文件级权限过滤。
 7. 性能：1w文件+权限配置 列表不超过2s、知识检索节点增加时延 100文件<200ms, 1w文件<1s；未配置文件权限，不影响检索性能
 
@@ -92,11 +92,11 @@ FastGPT 当前权限体系以 **team 为资源绑定单位**，权限粒度到 `
 
 | 方案 | 思路 | 优点 | 缺点 |
 |------|------|------|------|
-| A. 纯动态合并 | 所有子资源都不存快照，鉴权时实时向上递归 | 一致性最好，无传播问题 | 树深时性能差，列表需递归 |
-| B. 快照+动态合并（推荐） | folder 存快照；普通 dataset/collection 动态合并；变更时向下 bulkWrite 同步 | 读取快，列表简单 | 写入重，需保证事务/幂等 |
-| C. 全快照 | 所有资源都存完整父级快照 | 读取最快 | 写入最重，冗余大 |
+| A. 纯动态合并 | 所有子资源都不存快照，鉴权时实时向上递归 | 一致性最好，无传播问题 | 树深时性能差，列表需递归 | 
+| B. 快照+动态合并 | folder 存快照；普通 dataset/collection 动态合并；变更时向下 bulkWrite 同步 | 读取快，列表简单 | 写入重，需保证事务/幂等 |
+| C. 全快照（推荐） | 所有资源都存完整父级快照 | 读取最快 | 写入最重，冗余大 |
 
-**推荐方案 B**，与 FastGPT 现有模型保持一致，改动最小。
+**推荐方案 C（全快照）**：继承态 Collection（含非 folder）都写入 `merge(父级有效 clbs, 自身 clbs)` 的完整有效快照，鉴权/列表/检索直接读快照，不再动态向上合并。相比方案 B 的取舍：为消除「动态合并 + 父级快照」两套语义的漂移与鉴权递归成本，写放大（父级权限变化时全量 diff 重算子树快照）通过 `deriveOwnClbs` + 精确 diff 写入（非 sumPer 累加）控制。
 
 ### 3.2 列表过滤方案
 
@@ -120,7 +120,7 @@ D方案 测试结果（分页，一页20，不包含平铺）:
 #### 3.2.1 推荐实现
 
 - Collection 和权限记录均使用 `$in` 批量查询，避免 N+1。
-- 对继承态 Collection Folder 使用已同步的权限快照；普通 Collection 尽量复用 Dataset / Folder 的解析结果，避免重复递归。
+- 对继承态 Collection（Folder 与非 Folder）使用已同步的完整权限快照，直接读快照判定可读性。
 - 若用户对 Dataset/Collection Folder 有 `read`，且当前范围内所有 Collection 都是继承态，可直接复用 Dataset/Collection Folder 的有效权限，权限计算从约 1 万次降为 1 次或少量批次。
 - 团队所有者无需再进行权限解析，权限计算从约 1 万次降为 1 次或少量批次。
 
@@ -170,22 +170,24 @@ MongoResourcePermission.find({
 
 | 接口 | 方法 | 用途 | 关键请求参数 | 权限要求 | 主要行为 |
 |------|------|------|--------------|----------|----------|
-| `/api/core/dataset/list` | GET | 查询当前路径下的 Dataset | `parentId`、`searchText` | Dataset 列表访问权限 | 仅返回当前路径下用户可见的 Dataset；搜索不跨路径 |
-| `/api/core/dataset/update` | PUT | 更新或移动 Dataset | `id`、`parentId`、`inheritPermission` | 源 Dataset `manage`；移动到根目录还需团队创建权限 | 移动时按新父级权限合并；Folder Dataset 继续同步子 Folder 快照 |
-| `/api/core/dataset/collaborator/update` | POST | 更新 Dataset 协作者 | `datasetId`、`collaborators` | Dataset `manage` | 更新 Dataset 权限，并同步继承态的子 Dataset Folder 与 Collection Folder 快照 |
-| `/api/core/dataset/resumeInheritPermission` | POST | 恢复 Dataset 权限继承 | `datasetId` | Dataset `manage` | 合并父级权限，恢复继承态，并向下同步继承态 Folder 快照 |
-| `/api/core/dataset/collection/list` | GET | 查询当前路径下的 Collection | `datasetId`、`parentId`、`searchText` | Dataset `read` | 先校验 Dataset `read`，再按 Collection `read` 过滤；无权限子目录下的可见内容可平铺 |
-| `/api/core/dataset/collection/create`等创建collection接口 | POST | 创建 Collection | `datasetId`、`parentId`、`type`、`inheritPermission`（各子接口按场景补充文件、链接、模板、API 等参数） | 父级 `write` 或 `manage` | 所有创建入口统一遵循 Collection 权限模型：默认继承父级权限；Folder Collection 创建权限快照；`inheritPermission=false` 时创建独立权限资源 |
-| `/api/core/dataset/collection/update` | PUT | 更新或移动 Collection | `collectionId`、`parentId`、`inheritPermission` | Collection `manage` | 移动时按目标父级重新计算权限；继承态 Folder Collection 同步子 Folder 快照 |
-| `/api/proApi/core/dataset/collection/collaborator/update` | POST | 更新 Collection 协作者 | `collectionId`、`collaborators` | Collection `manage` | 冲突时切换为非继承态；Folder Collection 的权限变更同步到继承态子 Folder |
-| `/api/core/dataset/collection/resumeInheritPermission` | POST | 恢复 Collection 权限继承 | `collectionId` | Collection `manage` | 清理非 owner 的独立权限，或按父级重建 Folder 快照，并同步子 Folder |
+| `/api/core/dataset/create` | POST | 创建 Dataset（含 `folder`） | `parentId`、`type`、`name`、`inheritPermission` | 父级 `write`（无父级则团队创建权限） | 新 Dataset 默认 `inheritPermission=true`；显式 `false` 时创建为独立权限资源（仅 owner） |
+| `/api/core/dataset/list` | GET | 查询当前路径下的 Dataset | `parentId`、`searchText` | Dataset 列表访问权限 | 平铺穿透：仅返回当前路径下可见的 Dataset，无权限中间文件夹下的可见 Dataset 提升到最近可读祖先展示（隐藏完整路径）；搜索限定当前可见范围，不跨路径 |
+| `/api/core/dataset/update` | PUT | 更新或移动 Dataset | `id`、`parentId` | 源 Dataset `manage`；移动到根目录还需团队创建权限 | 移动时**保持自身继承关系不变**（不接收 `inheritPermission` 参数）：原继承态按新父级合并，原独立态保留独立配置；以旧/新有效 clbs 重建其下所有继承态 Collection 快照 |
+| `/api/core/dataset/collaborator/update` | POST | 更新 Dataset 协作者 | `datasetId`、`collaborators` | Dataset `manage` | 更新 Dataset 权限，并重建其下所有继承态 Collection（Folder 与非 Folder）快照 |
+| `/api/core/dataset/resumeInheritPermission` | POST | 恢复 Dataset 权限继承 | `datasetId` | Dataset `manage` | 合并父级权限，恢复继承态，并重建其下所有继承态 Collection 快照 |
+| `/api/core/dataset/collection/list` | GET | 查询当前路径下的 Collection | `datasetId`、`parentId`、`searchText` | Dataset `read` | 先校验 Dataset `read`，再按 Collection `read`（读快照）过滤；无权限子目录下的可见内容可平铺 |
+| `/api/core/dataset/collection/create`等创建collection接口 | POST | 创建 Collection | `datasetId`、`parentId`、`type`、`inheritPermission`（各子接口按场景补充文件、链接、模板、API 等参数） | 父级 `write` 或 `manage` | 所有创建入口统一遵循 Collection 权限模型：默认继承父级权限；继承态（Folder 与非 Folder）创建完整快照；`inheritPermission=false` 时创建独立权限资源 |
+| `/api/core/dataset/collection/update` | PUT | 更新或移动 Collection | `collectionId`、`parentId` | Collection `manage` | 移动时**保持自身继承关系不变**（不接收 `inheritPermission` 参数）：原继承态以 `deriveOwnClbs` + 目标父级重建完整快照，原独立态仅更新 `parentId`；继承态 Folder Collection 递归同步子 Collection 快照 |
+| `/api/proApi/core/dataset/collection/collaborator/update` | POST | 更新 Collection 协作者 | `collectionId`、`collaborators` | Collection `manage` | 冲突时切换为非继承态；写完整快照，Folder Collection 递归同步继承态子 Collection |
+| `/api/core/dataset/collection/resumeInheritPermission` | POST | 恢复 Collection 权限继承 | `collectionId` | Collection `manage` | 所有类型（Folder / 非 Folder）重建完整快照（merge 父级 + 自身），Folder 递归同步子 Collection |
 | Dataset 检索接口 | POST/GET | 知识库检索 | Dataset 查询参数 | Dataset `read` | 在 Dataset 鉴权后叠加可读 Collection 集合过滤，仅召回有权限文件内容 |
 
 创建collection接口：`/api/core/dataset/collection/create`、`/api/core/dataset/collection/create/fileId`、`/api/core/dataset/collection/create/localFile`、`/api/core/dataset/collection/create/link`、`/api/core/dataset/collection/create/text`、`/api/core/dataset/collection/create/apiCollectionV2`、`/api/core/dataset/collection/create/images`、`/api/core/dataset/collection/create/backup`、`/api/core/dataset/collection/create/template`、`/api/proApi/core/dataset/collection/create/externalFileUrl`
 
 ### 4.2 接口通用约束
 
-- `inheritPermission` 未传时默认为 `true`；显式传入 `false` 时资源进入独立权限状态。
+- **创建接口**：`inheritPermission` 未传时默认为 `true`；显式传入 `false` 时资源创建为独立权限状态。
+- **update / move 接口不接收 `inheritPermission` 参数**：移动资源时保持其自身的继承关系不变——原继承态资源继续继承（按新父级合并权限），原独立态资源保持独立配置（仅更新 `parentId`），不允许通过 move 改变继承关系。
 - `collaborators` 为全量替换语义，owner 由资源 `tmbId` 派生，不能通过协作者接口授予或移除。
 - Dataset `read` 是 Collection 访问的前置门槛；仅有 Collection 权限不能绕过 Dataset 权限。Dataset 详情接口只需校验 Dataset `read`，Collection 级别的可见性由 Collection 列表、详情和数据操作接口分别校验。
 - 列表接口的权限过滤、详情鉴权和检索过滤必须复用同一权限解析函数。
@@ -225,45 +227,26 @@ MongoResourcePermission.find({
 
 #### 6.1.4 对 collection / data 的影响
 
-- Dataset 协作者变更后，必须同步影响其下的 Collection 权限：
-  - 普通 Collection 在 `inheritPermission=true` 时不复制权限快照，鉴权阶段动态合并所属 Dataset / Collection Folder 的有效权限，因此权限立即生效。
-  - Collection Folder 需要维护权限快照；当其处于继承态时，沿 Dataset Folder 的同步链路更新自身及下级继承态 Collection Folder 的 `resource_permissions`。
+- Dataset 协作者变更后，必须同步影响其下的 Collection 权限（全快照）：
+  - **所有继承态 Collection（Folder 与非 Folder）**：沿 Dataset 继承链逐层以「旧有效 clbs → 新有效 clbs」diff 重建快照（`syncDatasetCollectionFolders` → `syncRootCollections` → `syncCollectionChildrenPermission`），父级新增/降级/移除的协作者精确反映到每个子 Collection 快照。
   - `inheritPermission=false` 的 Collection 或 Collection Folder 不被覆盖，继续使用自身独立权限。
-- Dataset 协作者变更接口本身使用 `authDataset` 校验 Dataset `manage` 权限；变更完成后，普通 Collection 在后续访问时通过统一的 Collection 鉴权逻辑动态获得最新权限，Collection Folder 则使用已同步的权限快照。仅有 Collection 权限不能绕过 Dataset `read` 门槛。
+- Dataset 协作者变更接口本身使用 `authDataset` 校验 Dataset `manage` 权限；变更完成后，所有继承态 Collection 的快照已同步，后续访问直接读快照。
 
 ```mermaid
 flowchart TD
     A[变更 Dataset 协作者] --> B{遍历下级资源}
-    B -->|普通 Collection 且继承态| C[鉴权时动态合并新 Dataset 权限]
-    B -->|Collection Folder 且继承态| D[同步 folder 权限快照]
-    D --> E[继续同步下级继承态 Collection Folder]
+    B -->|继承态 Collection Folder/非 Folder| D[以 旧/新 Dataset 有效 clbs diff 重建快照]
+    D --> E[继续递归下级继承态 Collection]
     B -->|非继承态 Collection/Folder| F[保持独立权限，不覆盖]
-    C --> G[后续访问时解析最新 Collection 权限]
-    E --> G
+    E --> G[后续访问直接读快照]
     F --> G
-```
-
-因此 Dataset 权限变更后，Collection 的最终可见性和操作权限会立即更新，同时 Collection Folder 的权限快照保持与继承链一致。
-
-```mermaid
-flowchart TD
-    A[用户更新 folder F 协作者] --> B{F 是否冲突?}
-    B -->|是| C[inheritPermission=false]
-    B -->|否| D[保持继承态]
-    C --> E[syncChildrenPermission]
-    D --> E
-    E --> F{遍历子 folder}
-    F -->|继承态| G[insert/update/delete 子 folder clbs]
-    F -->|非继承态| H[跳过]
-    E --> I[普通 dataset 动态合并父级权限]
-    I --> J[collection 随 dataset 权限变化]
 ```
 
 ---
 
 ### 6.2 Move Dataset 如何影响其下的文件/文件夹
 
-移动 Dataset 时支持两种权限处理方式：默认继承新父目录权限，或保持资源原有的独立权限配置。继承新父目录时沿用当前实现的 `syncCollaborators + syncChildrenPermission`，并补充 Collection 相关权限同步；保持独立配置时不执行新父目录权限同步。
+移动 Dataset 时**不接收 `inheritPermission` 参数**，而是保持 Dataset 自身的继承关系不变：原为继承态的资源移动后继续继承（按新父级合并权限）；原为独立态的资源移动后保持独立配置，仅更新 `parentId`。继承新父目录时沿用当前实现的 `syncCollaborators + syncChildrenPermission`，并补充 Collection 相关权限同步；保持独立配置时不执行新父目录权限同步。
 
 #### 6.2.1 当前实现路径
 
@@ -274,13 +257,13 @@ flowchart TD
 
 1. 校验目标 folder / 源 folder / 根目录创建权限。
 2. `checkMoveFolderDepth` 校验深度与成环。
-3. 事务中根据请求的权限处理方式执行：
-   - `inheritPermission=true`（默认）：
+3. 事务中根据 **被移动 Dataset 自身的 `inheritPermission`**（DB 当前值，非请求参数）执行：
+   - 原继承态（`inheritPermission !== false`）：
      - `getResourceOwnedClbs(parentId)` 读取目标父 folder 的显式协作者。
      - `syncCollaborators(id, parentClbs)` 将目标父 folder 权限合并到被移动 Dataset。
      - 如果被移动的是 Folder Dataset，调用 `syncChildrenPermission(dataset, parentClbs)` 继续向下同步。
-     - 更新 `parentId`，并设置 `inheritPermission=true`。
-   - `inheritPermission=false`：
+     - 更新 `parentId`，并设置 `inheritPermission=true`（保持继承态）。
+   - 原独立态（`inheritPermission === false`）：
      - 仅更新 `parentId`。
      - 保留被移动 Dataset 原有的独立 clbs，不同步目标父 folder 权限。
      - 保持 `inheritPermission=false`。
@@ -288,17 +271,16 @@ flowchart TD
 #### 6.2.3 对子资源的影响
 
 - **被移动 folder**：
-  - `inheritPermission=true` 时，自身 clbs 与目标父 folder 合并（父 owner 降级为 manage），子 folder 的 clbs 同步为目标父 folder 的权限快照。
-  - `inheritPermission=false` 时，保留自身独立 clbs；其继承态子 folder 不因本次 move 重新同步目标父 folder 权限。
+  - 原继承态时，自身 clbs 与目标父 folder 合并（父 owner 降级为 manage），子 folder 的 clbs 同步为目标父 folder 的权限快照。
+  - 原独立态时，保留自身独立 clbs；其继承态子 folder 不因本次 move 重新同步目标父 folder 权限。
   - 子普通 dataset 在继承态下动态合并新的父级权限。
 - **被移动普通 dataset**：
-  - `inheritPermission=true` 时，自身 clbs 与目标父 folder 合并，并保持继承态。
-  - `inheritPermission=false` 时，保留原有独立 clbs，不提供目标父 folder 权限。
+  - 原继承态时，自身 clbs 与目标父 folder 合并，并保持继承态。
+  - 原独立态时，保留原有独立 clbs，不提供目标父 folder 权限。
   - 无子资源需要同步。
 - **collection / data**：
-  - Dataset move 本身不直接修改普通 Collection 的权限记录；普通 Collection 处于继承态时，后续鉴权按新的 Dataset / Collection Folder 父链动态解析权限。
-  - Collection Folder 属于需要维护权限快照的 folder 资源：当 Dataset 以 `inheritPermission=true` 移动并完成 `syncCollaborators + syncChildrenPermission` 后，必须沿新的 Dataset 权限链同步其下所有继承态 Collection Folder 的 `resource_permissions` 快照；下级继承态 Collection Folder 继续同步，非继承态 Collection Folder 跳过。
-  - 当 Dataset 以 `inheritPermission=false` 移动时，不同步目标父级权限；其下 Collection Folder 的继承关系仍基于该 Dataset 的独立权限，已有独立权限保持不变。
+  - Dataset move 本身不直接修改普通 Collection 的权限记录；但以继承态移动时，会以「移动前旧有效 clbs → 移动后新有效 clbs」调用 `syncDatasetCollectionFolders` 重建其下**所有继承态 Collection**（Folder 与非 Folder）的快照；下级继承态 Collection 继续递归，非继承态 Collection Folder 跳过。
+  - 当 Dataset 以独立态移动时，不同步目标父级权限；其下 Collection Folder 的继承关系仍基于该 Dataset 的独立权限，已有独立权限保持不变。
   - 非继承态普通 Collection / Collection Folder 继续使用自身独立权限，不被 Dataset move 覆盖。
 
 ```mermaid
@@ -313,7 +295,7 @@ sequenceDiagram
     U->>API: parentId=targetFolder
     API->>Auth: 校验源/目标/根权限
     API->>API: checkMoveFolderDepth
-    alt inheritPermission == true
+    alt 原继承态（dataset.inheritPermission !== false）
         API->>DB: getResourceOwnedClbs(targetFolder)
         API->>Sync: syncCollaborators(dataset, parentClbs)
         alt dataset.type == folder
@@ -321,8 +303,8 @@ sequenceDiagram
             Child->>Child: BFS 同步 Dataset Folder
             Child->>Child: 同步继承态 Collection Folder 快照
         end
-        API->>DB: update parentId, inheritPermission=true
-    else inheritPermission == false
+        API->>DB: update parentId, inheritPermission=true（保持继承态）
+    else 原独立态（dataset.inheritPermission === false）
         API->>DB: update parentId, 保留独立 clbs
         API->>DB: keep inheritPermission=false
     end
@@ -347,11 +329,8 @@ sequenceDiagram
 4. 如果是 folder：
    - `syncCollaborators` 将合并后的协作者写入自身。
    - `syncChildrenPermission` 向子 Dataset Folder 同步。
-5. **同步 Collection 权限**（`syncDatasetCollectionFolders`，复用通用原语）：
-   - 取每个 Dataset（含后代）下 **parentId 为空且继承态** 的根 Collection Folder。
-   - `syncCollaborators`：将 Dataset 有效 clbs（父级 owner 映射为 manage）并入根 folder 自身快照（sumPer）。
-   - `syncChildrenPermission`：以根 folder 为资源向继承态子 folder 传播（sumPer、保守删除、非继承态切断）。
-   - 对普通 Collection，不写入完整权限快照；设置/保持 `inheritPermission=true` 后，后续鉴权时动态合并恢复后的 Dataset / Collection Folder 权限。
+5. **同步 Collection 权限**（`syncDatasetCollectionFolders`，全快照）：
+   - 以「恢复前旧有效 clbs → 恢复后新有效 clbs」重建该 Dataset（含继承态后代）下**所有继承态 Collection**（Folder 与非 Folder）的完整快照。
    - 非继承态 Collection Folder 或普通 Collection 不被本次 Dataset 恢复继承覆盖，继续使用自身独立权限。
 6. 将 Dataset 的 `inheritPermission` 置为 `true`。
 
@@ -360,14 +339,11 @@ sequenceDiagram
 - **folder 恢复继承**：
   - Dataset 自身 clbs 恢复为“父级 + 自身旧权限”的合并快照。
   - Dataset 子 Folder 的 clbs 同步为合并后的快照。
-  - 其下继承态 Collection Folder 按 Collection Folder 树重新生成权限快照；普通 Collection 不生成完整快照，动态合并新的 Dataset / Collection Folder 权限。
-  - 非继承态 Collection / Collection Folder 保持自身独立权限。
+  - 其下所有继承态 Collection 按 Collection 树重建完整权限快照；非继承态 Collection / Collection Folder 保持自身独立权限。
 - **普通 dataset 恢复继承**（当前实现）：
   - 仅将 `inheritPermission` 置为 `true`。
   - 自身旧 clbs 不会被删除，将参与后续动态合并。
-  - 其下继承态 Collection Folder 需要根据恢复后的 Dataset 有效权限重建权限快照；普通 Collection 继续动态合并。
-  - 非继承态 Collection / Collection Folder 不被覆盖。
-  - **注意**：函数注释声称会删除自身 clbs，但当前代码并非如此，设计文档需明确此行为并建议后续统一。
+  - 其下所有继承态 Collection 根据恢复后的 Dataset 有效权限重建完整权限快照；非继承态 Collection / Collection Folder 不被覆盖。
 
 ```mermaid
 flowchart TD
@@ -375,13 +351,11 @@ flowchart TD
     B --> C[mergeCollaboratorList]
     C --> D[更新 Dataset 权限与 inheritPermission=true]
     D --> E{遍历 Dataset 下 Collection}
-    E -->|Collection Folder 且继承态| F[按 Collection Folder 树重建权限快照]
-    E -->|普通 Collection 且继承态| G[保留 owner，后续动态合并权限]
+    E -->|继承态 Collection Folder/非 Folder| F[以 旧/新 Dataset 有效 clbs 重建完整快照]
     E -->|非继承态 Collection/Folder| H[保持自身独立权限]
-    F --> I[继续同步下级继承态 Collection Folder]
-    G --> J[完成恢复继承]
+    F --> I[继续递归下级继承态 Collection]
+    I --> J[完成恢复继承]
     H --> J
-    I --> J
 ```
 
 ---
@@ -401,13 +375,17 @@ inheritPermission: {
 
 在 `resource_permissions.resourceType` 枚举中新增 `collection`。
 
-#### 6.4.2 不变量
+#### 6.4.2 不变量（全快照模型）
 
-- 继承态非 folder collection：至少包含自身 owner 记录；若新增协作者与父级权限无冲突，可保持继承态并写入该协作者记录（解析时与父级权限按位或合并）。
-- 继承态 collection folder：与 dataset folder 采用**同一继承模型**（`syncChildrenPermission` sumPer 语义）。folder 自身 clbs 是其配置（创建时并入父级，owner→manage；根 folder 需有自身 owner 记录）；变更时自身 clbs 全量替换为目标配置，子 folder 快照 = **sumPer(子自身, 父级)** 累加，**保守删除**（仅当协作者不在父级且子权限与父记录完全一致时移除）。
-- 非继承态 collection：拥有独立 clbs 配置（含自身 owner 记录），不再从父级继承权限；`syncChildrenPermission` 对非继承态 folder 天然切断（不加载、不被覆盖，其下继承态 folder 也不再被同步）。
+- **继承态 Collection（Folder 与非 Folder）**：`resource_permissions` 中存**完整有效快照** = `merge(父级有效 clbs, 自身 clbs)`。
+  - 父级有效 clbs：非根 Collection 取父 Collection Folder 快照；根 Collection（`parentId` 空）取所属 Dataset 有效 clbs。
+  - 自身 clbs = 自身 owner（由 `tmbId` 派生，始终保留）+ 独立添加的协作者。
+  - 鉴权直接读自身快照，**不再动态向上递归**。
+- **独立态 Collection（`inheritPermission=false`）**：只存自身 clbs，不从父级继承。
+- **父级权限变化传播**：`syncCollectionChildrenPermission` 以「旧父级 → 新父级」diff 重算所有继承态子 Collection 的快照——用 `deriveOwnClbs(当前快照, 旧父级)` 恢复自身 clbs，再与 `新父级` 合并，最后精确 diff 写入（支持权限降级，非 sumPer 只升不降）。
+- **owner 记录唯一来源**：owner 由资源 `tmbId` 派生，协作者接口不可授予/移除。
 
-> 注：早期设计为「父级镜像 + 自身 owner」的精确快照（`syncCollectionFolderPermission`），已统一为 `syncChildrenPermission` 累加模型以与 dataset folder 保持一致。
+> 注：早期设计为「folder 存快照、非 folder 动态合并」的方案 B（`syncChildrenPermission` sumPer 累加 + 保守删除），存在两个缺陷——权限降级时 sumPer 无法精确覆盖、以及父级自身协作者被错误下删，已统一为全快照模型。
 
 #### 6.4.3 `hasSetCollectionPermissions` 短路标记
 
@@ -415,7 +393,7 @@ inheritPermission: {
 
 **语义**：
 
-- `false`（默认）：该 Dataset 下没有任何 Collection 配置独立权限。所有 Collection 均为纯继承（非 folder 仅 owner 记录；Collection Folder 快照沿 Dataset 权限链 sumPer 派生）。此时每个 Collection 的有效权限 = Dataset 有效权限（父 owner 不透传、cap 为 manage），collection 级鉴权可**短路为 Dataset 级鉴权**。
+- `false`（默认）：该 Dataset 下没有任何 Collection 配置独立权限。所有 Collection 均为纯继承（每个继承态 Collection 的快照 = `merge(Dataset 有效 clbs, [自身 owner])`，自身 clbs 仅 owner）。此时每个 Collection 的有效权限 = Dataset 有效权限（父 owner 不透传、cap 为 manage），collection 级鉴权可**短路为 Dataset 级鉴权**。
 - `true`：至少一个 Collection 配置了独立/自定义权限（`inheritPermission=false`、追加非 owner 协作者、独立 move）。collection 级鉴权必须走完整解析（`getReadableCollectionIds` / `resolveCollectionPermission`）。
 - 旧数据（字段缺失 `undefined`）按**未知**处理，不做短路（走完整解析）。原因：迁移前存量 Dataset 可能已含非继承态 Collection，短路会基于 Dataset 权限错误放行；正确性优先。升级迁移（§12）统一写入显式 `false` 后短路生效。
 
@@ -442,43 +420,24 @@ inheritPermission: {
 
 ### 6.5 Collection 权限解析
 
-#### 6.5.1 authDatasetCollection 解析规则
+#### 6.5.1 authDatasetCollection 解析规则（全快照）
 
-单个资源鉴权规则，用于 create / update / 协作者变更等单资源操作。
+单个资源鉴权规则，用于 create / update / 协作者变更等单资源操作。全快照模型下 Collection 的 `resource_permissions` 已存完整有效权限，**直接读自身快照**，不再向上递归：
 
 ```
 resolvePermission(resourceId, resourceType, tmbId):
-  R = 查询资源 { inheritPermission, parentId, datasetId, type }
-  
-  # 1. 父级有效权限
-  # folder 资源使用已同步的权限快照，不在鉴权时动态向上递归
-  if inheritPermission == true 且 R.type != folder 且 存在父级:
-     父引用 = (resourceType == collection) 
-              ? (parentId 非空 ? parentId : datasetId)
-              : (parentId 非空 ? parentId : null)
-     父类型 = (resourceType == collection)
-              ? (parentId 非空 ? collection : dataset)
-              : dataset
-     parentEffective = resolvePermission(父引用, 父类型, tmbId)
-  else:
-     parentEffective = 0
-  
-  # 2. 父级 owner 位封顶为 manage（不透传 owner）
-  parentContribution = (parentEffective == OwnerRoleVal) ? ManageRoleVal : parentEffective
-  
-  # 3. 自身 clbs
+  # 1. 直接读资源自身快照（已含父级贡献）
   myPer = getTmbPermission(resourceType, teamId, tmbId, resourceId)
-  
-  # 4. 合并
-  return sumPer(parentContribution, myPer)
+  # 2. 无记录 → 无权限（NullRoleVal）
+  return myPer ?? NullRoleVal
 ```
 
 #### 6.5.2 关键约束
 
-- **父级 owner 不透传**：父级 owner 经继承链在子资源上至多获得 `manage`，不能获得子资源 `owner` 级操作权。
-- **folder 资源存快照**：folder（dataset folder / collection folder）需要维护完整的 `resource_permissions` 快照。
-- **非 folder 资源动态合并**：普通 dataset / 普通 collection 在 `inheritPermission=true` 时，鉴权阶段动态合并父级权限。
+- **全快照**：继承态 Collection（folder 与非 folder）在写入时已把父级贡献并入自身快照，鉴权不递归父链。
+- **父级 owner 不透传**：写入快照时父级 owner 经 `mergeCollaboratorList` 降级为 `manage`；子资源自身的 owner（由 `tmbId` 派生）保持 `OwnerRoleVal`。
 - **owner 记录唯一来源**：owner 记录由资源 `tmbId` 派生，协作者接口不可授予/移除 owner。
+- **短路优化**：团队 owner/admin 或 `hasSetCollectionPermissions=false`（纯继承）可跳过逐 Collection 解析（见 6.4.3），但正确性不依赖短路。
 
 ### 6.6 Collection 协作者配置接口
 
@@ -487,19 +446,16 @@ resolvePermission(resourceId, resourceType, tmbId):
 - **输入**：
   - `collectionId`
   - `collaborators`：全量协作者列表
-- **实现**：该接口**直接复用通用 `updateResourceCollaborators`**（与 dataset/app 协作者更新同一链路），外围补充 Collection 专属处理：
+- **实现**：调用 Collection 专属 `updateCollectionCollaborators`（`packages/service/support/permission/collection/controller.ts`）：
 
   1. `authDatasetCollection` 校验 Collection `manage`，返回 collection（含 `datasetId`/`parentId`/`inheritPermission`/`type`）。
   2. 标记所属 Dataset `hasSetCollectionPermissions=true`（`markDatasetCollectionPermissionsSet`，短路前提）。
-  3. 计算 `parentClbs`：有 `parentId` 取父 Collection Folder 快照；根 Collection 取所属 Dataset 的**实际（有效）clbs**（`getDatasetEffectiveClbs`：自身 + 直接父级 Dataset Folder 全量快照，参照 `authDatasetByTmbId`）。
-  4. 计算 `oldChildClbs`：Collection 自身现有 clbs。
-  5. 调用 `updateResourceCollaborators`（`resourceType=collection`、`resourceModel=MongoDatasetCollection`、`folderTypeList=[folder]`）：
-     - folder 由其内部执行 `syncChildrenPermission`（sumPer 累加，非继承态切断）；
-     - 冲突时（`inheritPermission && isConflict && !!parentId`）将 `inheritPermission` 翻转为 `false`；
-     - 自身 clbs 全量替换（folder / 冲突）或差分更新（非 folder 无冲突）。
-  6. 回读 collection 的 `inheritPermission` 返回。
+  3. 计算 `parentClbs`：有 `parentId` 取父 Collection Folder 快照；根 Collection 取所属 Dataset 的**实际（有效）clbs**（`getDatasetEffectiveClbs`）。
+  4. 冲突检测（`checkRoleUpdateConflict`，`collaborators` 为目标完整有效 clbs）：继承态且冲突（试图修改/删除父级协作者）时翻转为独立态。
+  5. 继承态无冲突：自身 clbs = `deriveOwnClbs(collaborators, parentClbs)`，快照 = `merge(parentClbs, 自身 clbs)`（等价于 `collaborators`）；独立态：快照 = `collaborators`。
+  6. 写完整快照（`syncCollectionCollaborators`）；若是 Folder，递归同步其继承态子 Collection（`syncCollectionChildrenPermission`）。
+  7. 回读 collection 的 `inheritPermission` 返回。
 
-- **owner 处理**：与 dataset/app 一致，接口不强制 owner 不可变（owner 由客户端在全量列表中原样携带；owner 变更走专用 `changeOwner` 流程）。早期设计为 Collection 增加的 owner 严格校验与 `sanitizeCollaboratorPermissions` 规范化，已随独立的 `updateCollectionCollaborators` 一并移除，保持与通用链路一致。
 - **响应**：`{ inheritPermission: boolean }`（冲突时 false，否则保持原值）。
 
 ### 6.7 创建 Collection
@@ -513,12 +469,9 @@ resolvePermission(resourceId, resourceType, tmbId):
   - 其他创建字段
 - **逻辑**：
   1. 新 collection 默认 `inheritPermission=true`；若接口显式传入 `inheritPermission=false`，则创建为独立态。
-  2. 创建 folder collection 时：
-     - 计算父级 clbs：有 `parentId` 取父 Collection Folder 快照；根 Collection（`parentId` 空）取所属 Dataset 的**实际（有效）clbs**（`getDatasetEffectiveClbs`，而非仅 Dataset 自身 clbs）。
-     - 快照 = merge(父级 clbs, [自身 owner])（父级 owner→manage 由 `mergeCollaboratorList` 完成），**直接 `insertMany` 落库**（新资源无既有记录，无需差异替换）。
-  3. 创建非 folder collection 时：
-     - 仅写入自身 owner 记录；若传入 `inheritPermission=false`，保持独立态。
-  4. 独立态（`inheritPermission=false`）创建时置所属 Dataset `hasSetCollectionPermissions=true`。
+  2. 计算父级 clbs：有 `parentId` 取父 Collection Folder 快照；根 Collection（`parentId` 空）取所属 Dataset 的**实际（有效）clbs**（`getDatasetEffectiveClbs`）。
+  3. `inheritPermission=true`（全快照）：对 **Folder 与非 Folder** 都写入 `merge(父级 clbs, [自身 owner])` 完整快照，直接 `insertMany` 落库（新资源无既有记录）。
+  4. `inheritPermission=false`：仅写入自身 owner 记录，并置所属 Dataset `hasSetCollectionPermissions=true`。
 
 ### 6.8 移动 Collection
 
@@ -526,21 +479,18 @@ resolvePermission(resourceId, resourceType, tmbId):
 - **输入**：
   - `collectionId`
   - `parentId`：目标位置（`null` 表示根目录）
-  - `inheritPermission`：可选布尔，未传时保持 Collection 原继承状态（不再默认 `true`）
-- **策略**：
-  - `inheritPermission=true`（默认）：沿用当前 Dataset move 的权限同步语义，继承新父级权限；执行 `syncCollaborators + syncChildrenPermission`，并同步 Collection Folder 及其下级继承态 Collection Folder 的权限快照。
-  - `inheritPermission=false`：保持 Collection 原有独立配置，仅更新 `parentId`，不继承新父级 clbs；其下已有独立配置的子资源保持不变。
-- **事务中**：
-  - 若 `inheritPermission=true`：目标父级 clbs = 目标父 Collection Folder 快照，`targetParentId` 为空（根目录）时为所属 Dataset 有效 clbs（`getDatasetEffectiveClbs`）。folder 经 `syncCollaborators` 并入目标父级 clbs（owner→manage，sumPer 保留自身独立 clbs 与 owner），再经 `syncChildrenPermission` 向继承态子 folder 同步（sumPer 累加、保守删除）；非 folder 仅 `syncCollaborators` 合并目标父级 clbs。
-  - 若 `inheritPermission=false`：仅更新 `parentId`，保留自身独立 clbs。
-  - `inheritPermission` 未传时保持 Collection 原有继承状态（不再默认 `true`）。
+  - **不接收 `inheritPermission` 参数**：移动时保持 Collection 自身的继承关系不变。
+- **策略**（`moveCollectionPermission`，全快照）：
+  - **原继承态**（`collection.inheritPermission !== false`）：目标父级 clbs = 目标父 Collection Folder 快照 / 根目录为 Dataset 有效 clbs；源父级 clbs = 移动前父 Collection Folder 快照 / Dataset 有效 clbs（此前独立则视为空）。用 `deriveOwnClbs(当前快照, 源父级)` 恢复自身 clbs，写新快照 `merge(目标父级, 自身 clbs)`；若是 Folder，递归同步其子 Collection（旧快照 → 新快照）。
+  - **原独立态**（`collection.inheritPermission === false`）：保持 Collection 原有独立配置，仅更新 `parentId`，不继承新父级 clbs。
+  - 移动不改变 Collection 自身的继承关系（不能通过 move 把继承态切换为独立态，反之亦然）。
 
 ### 6.9 恢复 Collection 继承
 
 - 入口：`POST /api/core/dataset/collection/resumeInheritPermission`
-- 逻辑与当前 `resumeInheritPermission` 实现保持一致，并补充 Collection 级处理：
-  - 非 folder：置 `inheritPermission=true`，后续动态合并父级权限。
-  - folder：经 `syncCollaborators` 并入父级 clbs（owner→manage，sumPer 保留自身独立 clbs 与 owner），置 `inheritPermission=true`，继承态子 folder 经 `syncChildrenPermission` 同步（sumPer）。
+- 逻辑（`resumeCollectionInheritPermission`，全快照）：
+  - 所有类型（Folder / 非 Folder）：加载当前快照（独立态时即自身 clbs），与父级有效 clbs 合并为完整快照写入（`syncCollectionCollaborators`），置 `inheritPermission=true`。
+  - 若是 Folder，用「旧快照 → 新快照」递归同步其继承态子 Collection。
   - 非继承态子 Collection / Collection Folder 保持独立配置，不被恢复继承操作覆盖。
 
 ---
@@ -569,9 +519,7 @@ resolvePermission(resourceId, resourceType, tmbId):
 
 1. 按 Dataset 范围查询 Collection 候选数据；进入 Dataset 根目录时，不能仅使用 `parentId=null` 限制候选集，否则无法发现隐藏 Collection Folder 下用户有权限的 Collection。此时应以 `datasetId` 为边界查询该 Dataset 下的 Collection，并保留 `parentId`、`type` 等字段用于后续目录层级判断。
 2. 对候选 Collection 使用 `$in` 批量加载权限记录，避免 N+1 查询。
-3. 对候选 Collection 批量解析当前用户权限：
-   - Collection Folder 直接读取已同步的权限快照。
-   - 普通 Collection 动态合并 Dataset / Collection Folder 的有效权限，并复用同一父级的解析结果。
+3. 对候选 Collection 批量解析当前用户权限：全快照下每个 Collection 的 `resource_permissions` 即完整有效权限，直接读快照判定。
 4. 过滤出权限为 `read` 及以上的 Collection，得到可读集合 R（含 `_id`、`parentId`）。
 5. 在内存中对可读集合 R 构建平铺层级、得到展平列表 L（详见 7.2.3）。
 6. 分页：`total = |R|`；当前页 = `L[offset, offset + pageSize)`。
@@ -582,13 +530,13 @@ resolvePermission(resourceId, resourceType, tmbId):
 - 使用 `$in` 批量加载权限记录，避免 N+1。
 - 第一阶段只读取最小字段，第二阶段只对可读 ID 回查完整字段和数据统计；可见率越低，节省的完整字段和 `$lookup` 读取量越明显。
 - 对全继承态 Dataset 可走短路：若用户对 Dataset 有 `read` 且全部 Collection 均为继承态，可直接生成可读 ID 集合，无需逐条递归解析。
-- Collection Folder 使用已同步权限快照；普通 Collection 复用 Dataset / Collection Folder 的有效权限结果，避免重复递归。
+- Collection（Folder 与非 Folder）使用已同步完整权限快照，直接读快照判定可读性，避免逐条递归解析。
 
 ### 7.2 文件夹权限穿透与平铺展示
 
 #### 7.2.1 目标
 
-- Dataset（知识库）的展示保持当前实现，不因用户对 Dataset 所属文件夹无整体权限而改变 Dataset 的层级展示规则。
+- Dataset（知识库）列表同样应用平铺穿透：用户对 Dataset 所属文件夹无整体权限，但对其下某个 Dataset 有 `read` 权限时，该 Dataset 可以脱离不可见的父文件夹层级平铺展示；对 Dataset 有 `read` 权限的中间文件夹正常展示为层级节点。
 - 在已展示的 Dataset 内，Collection 列表按 Collection 级别 `read` 权限过滤。
 - 用户对 Collection 父 folder 无整体权限，但对其下某个 Collection 有 `read` 权限时，该 Collection 可以脱离不可见的父 folder 层级平铺展示。
 - 仅拥有 Collection 权限但没有所属 Dataset `read` 权限时，不展示该 Dataset，也不展示其下 Collection。
@@ -596,7 +544,7 @@ resolvePermission(resourceId, resourceType, tmbId):
 
 #### 7.2.2 实现策略
 
-1. Dataset 列表沿用当前实现，不在本需求中改动 Dataset 的展示、层级和过滤规则。
+1. Dataset 列表复用 Collection 列表的平铺方案（`buildFlattenedCollectionList`）：以团队全部未删除 Dataset 的最小字段（`_id / parentId / tmbId / type / inheritPermission`）为候选，解析有效 `read` 权限得到可读集合 R，平铺后取当前目录的可见 Dataset ID，再回查完整字段 + 类型/搜索过滤 + 排序。
 2. 用户进入已展示的 Dataset 后，Collection 列表按以下规则过滤和组织：
    - 先校验当前用户对 Dataset 具有 `read` 权限；没有 Dataset `read` 时直接返回空列表或拒绝访问。
    - 进入 Dataset 根目录时，不能仅使用 `parentId=null` 限制候选集，否则无法发现隐藏 Collection Folder 下用户有权限的 Collection；此时应以 `datasetId` 为边界查询该 Dataset 下的 Collection，并保留 `parentId`、`type` 等字段用于后续目录层级判断。
@@ -684,16 +632,10 @@ export type CollectionPermissionItemType = Pick<
 
 /**
  * 批量计算用户可读（有效权限 ≥ read）的 Collection ID，供列表、检索复用。
- * 与 6.5.1 resolvePermission 保持同一语义，仅做 Collection 级过滤：
- * - 可读判定已下推到查询端（buildPermissionQuery 的 $bitsAnySet），保持一次 distinct
- *   查询、只回去重 ID，不拉权限值、不做内存分组；
- * - folder：读已同步权限快照（自身记录即完整有效权限，不向上递归）；
- * - 非 folder 继承态：自身可读，或父级可读（父 Collection Folder 快照，或根级 Dataset）；
- * - 非继承态：仅自身可读。
- * 前置条件：调用方已通过 Dataset read 鉴权；根级继承态 Collection 的可读性依赖
- * datasetPermission（Dataset 有效角色），避免仅凭 parentId 为空就放行。
- * 返回结果含 folder ID；检索使用前需将 folder 递归展开为其下文件 Collection ID（见 7.3.2）；
- * 多 Dataset 检索需按 datasetId 分组分别调用。
+ * 全快照模型：每个 Collection 的快照都是完整有效权限，可读性判定只需查询目标
+ * Collection 自身的 resource_permissions（buildPermissionQuery 的 $bitsAnySet 在查询端
+ * 过滤），无需再加载父 Folder / Dataset 做继承判定。
+ * hasSetCollectionPermissions=false 时短路为 Dataset 级鉴权（纯继承 → 全部可读）。
  */
 export async function getReadableCollectionIds({
   collections,
@@ -701,33 +643,35 @@ export async function getReadableCollectionIds({
   teamId,
   groupIds,
   orgIds,
-  datasetPermission
+  datasetPermission,
+  hasSetCollectionPermissions
 }: {
   collections: CollectionPermissionItemType[];
   tmbId: string;
   teamId: string;
   groupIds: string[];
   orgIds: string[];
-  /** 调用方已解析的 Dataset 有效角色（role 位掩码），用于根级继承态 Collection。 */
+  /** Dataset 有效角色（role 位掩码），仅用于纯继承短路。 */
   datasetPermission: PermissionValueType;
+  /** 所属 Dataset 是否配置过 Collection 级权限：false 时短路为 Dataset 级鉴权。 */
+  hasSetCollectionPermissions?: boolean;
 }): Promise<string[]> {
   if (collections.length === 0) return [];
 
-  // 需要读取权限的资源：Collection 自身 + 其父 Collection Folder（继承判定用）
-  const resourceIdSet = new Set<string>();
-  for (const item of collections) {
-    resourceIdSet.add(String(item._id));
-    if (item.parentId) resourceIdSet.add(String(item.parentId));
+  if (hasSetCollectionPermissions === false) {
+    const datasetHasRead =
+      datasetPermission != null &&
+      new Permission({ role: datasetPermission, isOwner: false }).checkPer(ReadRoleVal);
+    return datasetHasRead ? collections.map((item) => String(item._id)) : [];
   }
 
-  // 一次查询、去重、只回 ID：可读判定已在查询端通过 $bitsAnySet 过滤
   const readableResourceIds = new Set(
     (
       await MongoResourcePermission.distinct(
         'resourceId',
         buildPermissionQuery({
           teamId,
-          resourceIds: Array.from(resourceIdSet),
+          resourceIds: collections.map((item) => String(item._id)),
           tmbId,
           groupIds,
           orgIds
@@ -736,25 +680,9 @@ export async function getReadableCollectionIds({
     ).map(String)
   );
 
-  const readableIds: string[] = [];
-  for (const item of collections) {
-    const itemId = String(item._id);
-    const parentId = item.parentId ? String(item.parentId) : null;
-    const isFolder = item.type === DatasetCollectionTypeEnum.folder;
-
-    const selfReadable = readableResourceIds.has(itemId);
-    // 仅非 folder 继承态才继承父级；父级 = 父 Collection Folder（快照）或根级 Dataset
-    const inheritedReadable =
-      item.inheritPermission !== false &&
-      !isFolder &&
-      parentId && readableResourceIds.has(parentId);
-
-    if (selfReadable || inheritedReadable) {
-      readableIds.push(itemId);
-    }
-  }
-
-  return readableIds;
+  return collections
+    .filter((item) => readableResourceIds.has(String(item._id)))
+    .map((item) => String(item._id));
 }
 
 ```
@@ -785,7 +713,7 @@ export async function getReadableCollectionIds({
 
 - **团队管理员 / 团队所有者**：在 Dataset `read` 前置鉴权通过后，直接视为对该 Dataset 下所有 Collection 拥有可读权限，不逐条解析 Collection 权限；但仍按当前目录范围、Collection 类型、平铺规则和分页返回结果，不改变真实 `parentId`，也不返回隐藏路径信息。
 - **`hasSetCollectionPermissions === false`（无 Collection 自定义权限，§6.4.3）**：优先校验该字段。纯继承 Dataset 下每个 Collection 的有效权限 = Dataset 有效权限，Dataset `read` 已通过即全部可读，O(1) 短路，无需扫描 `inheritPermission` 字段，也无需读取 `resource_permissions`。
-- **全部 Collection 均为继承态**：若用户已拥有 Dataset `read`，且当前 Dataset 范围内的 Collection（包括 Collection Folder）均为 `inheritPermission=true`，则普通 Collection 可直接复用 Dataset 或所属 Collection Folder 的有效权限；Collection Folder 直接读取已同步的权限快照，不逐条递归父链。若 Dataset 的有效权限满足 `read`，可直接生成当前范围的可读 Collection ID 集合，再进行平铺、排序和分页。
+- **全部 Collection 均为继承态**：若用户已拥有 Dataset `read`，且当前 Dataset 范围内的 Collection（包括 Collection Folder）均为 `inheritPermission=true`，则每个 Collection 的有效权限 = Dataset 有效权限，可直接复用 Dataset 权限生成可读集合，无需逐条读快照。若 Dataset 的有效权限满足 `read`，可直接生成当前范围的可读 Collection ID 集合，再进行平铺、排序和分页。
 - **存在非继承态 Collection**：不能使用上述全量短路，必须对非继承态 Collection 单独解析自身权限；继承态 Collection 仍可复用其父级解析结果。
 
 **计算复杂度分析**：
@@ -805,7 +733,7 @@ export async function getReadableCollectionIds({
 | 查询最小字段 | 数据库读取量 `O(N)` | 应用侧 `O(N)` | 首次只读取 `_id / parentId / type / inheritPermission / tmbId` 等权限和层级字段；实际耗时取决于 `datasetId` 索引和候选数量 |
 | 批量读取权限记录 | 数据库读取量 `O(P)` | 应用侧 `O(P)` | 使用 `resourceType + resourceId` 等索引和 `$in` 批量读取；10 个协作者场景的记录量上界约为 `P = 10N`，实际应只加载与当前用户相关的权限记录 |
 | 权限记录分组 | `O(P)` | `O(P)` | 按 `resourceId` 建立权限映射，避免逐条查询 |
-| Collection 权限解析 | 缓存后 `O(N + P)` | `O(N)` | Collection Folder 直接读取已同步快照；普通 Collection 复用 Dataset / Collection Folder 的有效权限结果；不缓存父级结果会额外退化为 `O(N × D)` |
+| Collection 权限解析 | 缓存后 `O(N)` | `O(N)` | 全快照下每个 Collection 直接读自身快照，无父链递归；批量为 `$in` 一次查询 |
 | 构建父子索引 | `O(N)` | `O(N)` | 建立 `_id -> node`、`parentId -> children` 映射，并用于祖先链查找 |
 | 计算虚拟展示父级 | 缓存后 `O(V)`；无缓存最坏 `O(V × D)` | `O(V)` | 只对权限达到 `read` 的节点计算最近可读祖先；用记忆化缓存避免重复沿 `parentId` 扫描 |
 | 当前目录筛选 | `O(V)` | `O(K)` | 只保留虚拟展示父级等于当前目录的节点，得到 `visibleIds`；`K` 为当前目录实际展示节点数 |
@@ -873,7 +801,7 @@ flowchart TD
 
 #### 7.3.1 规则
 
-- 详情、Dataset 列表与 Dataset 搜索保持当前 Dataset 鉴权和展示逻辑；Collection 列表、Collection 详情、平铺展示和检索均先校验所属 Dataset `read`，再校验 Collection `read`。
+- 详情、Dataset 列表与 Dataset 搜索保持当前 Dataset 鉴权；Dataset 列表在鉴权后叠加平铺穿透（无权限中间文件夹下的可读 Dataset 提升展示，隐藏完整路径）。Collection 列表、Collection 详情、平铺展示和检索均先校验所属 Dataset `read`，再校验 Collection `read`。
 - 文件级 `read` 不能绕过知识库门槛。
 - 知识库无 `read` 时，知识库及其全部文件均隐藏。
 
@@ -884,13 +812,12 @@ flowchart TD
 **统一处理流程**：
 
 1. **Dataset 前置鉴权**：检索入口先使用现有 Dataset 鉴权，过滤出用户有 `read` 权限的 Dataset；没有 Dataset `read` 时直接不参与检索。
-2. **解析可读 Collection 集合**：调用统一的批量 Collection 权限解析函数 `resolveReadableCollectionIds`，输入 `teamId、datasetIds、tmbId`，按 Collection owner、自身权限、Dataset / Collection Folder 继承权限计算有效权限，返回 `allowedCollectionIdList`。
+2. **解析可读 Collection 集合**：调用统一的批量 Collection 权限解析函数 `resolveReadableCollectionIds`，输入 `teamId、datasetIds、tmbId`，读取每个 Collection 的完整快照，返回 `allowedCollectionIdList`。
    - 团队管理员 / 团队所有者：直接返回 `undefined`（无 collection 级过滤需求，检索层按 Dataset 级别召回，跳过 collection 查询）。
    - 全部目标 Dataset 均 `hasSetCollectionPermissions === false`（纯继承）且 read 通过：返回 `undefined`（同上短路）。
    - 否则返回实际文件 Collection ID（Folder 递归展开为实际文件 ID）；Dataset read 未通过的 Dataset 在内部整体排除。
    - `undefined` 语义：由 `decideCollectionFilter` 识别为「无需权限过滤」，不设置 `collectionId IN`，跳过全量判定比较。
-   - Collection Folder 使用已同步权限快照；普通 Collection 动态合并 Dataset / Collection Folder 有效权限。
-   - 只返回有效权限达到 `read` 的实际文件 Collection ID；Folder ID 需要先递归展开为其下实际文件 Collection ID，不能只把 Folder ID 传给召回层。
+   - 全快照下每个 Collection 的 `resource_permissions` 即完整有效权限，直接读快照判定可读性，不做父链递归。
 3. **合并检索条件**：将 `allowedCollectionIdList` 与用户通过标签、时间、指定 Folder / Collection 等元数据形成的 `filterCollectionIdList` 求交集；同时排除 `forbidCollectionIdList`，得到 `effectiveCollectionIdList`。
    - 未提供元数据 Collection 条件时，`effectiveCollectionIdList = allowedCollectionIdList`。
    - 元数据条件求交集后为空时，直接返回空召回结果，不执行向量或全文检索。
@@ -907,7 +834,7 @@ flowchart TD
 
 **推荐代码落点**：
 
-- 权限解析：`resolveReadableCollectionIds` 位于 `packages/service/core/dataset/search/defaultRecall/effectiveCollection.ts`（与 `computeEffectiveCollectionIdList` / `decideCollectionFilter` 同一"collection 过滤决策"模块，管线内聚）；`getReadableCollectionIds` / `canShortCircuitCollectionPermission` 位于 `packages/service/support/permission/collection/readableCollection.ts`。
+- 权限解析：`resolveReadableCollectionIds` 位于 `packages/service/core/dataset/search/defaultRecall/collectionPermission.ts`（与 `computeEffectiveCollectionIdList` / `decideCollectionFilter` 同一"collection 过滤决策"模块，管线内聚）；`getReadableCollectionIds` / `canShortCircuitCollectionPermission` / `resolveCollectionPermission` 位于 `packages/service/support/permission/collection/auth.ts`。
 - 检索入口：在工作流 Dataset search、Agent Dataset search、search-test 完成 Dataset 鉴权后传入 `allowedCollectionIdList`。
 - 统一合并：在 `packages/service/core/dataset/search/defaultRecall/multiQueryRecall.ts` 将授权集合与元数据 Collection 条件求交集。
 - 召回下沉：由 `embeddingRecall.ts`、`fullTextRecall.ts` 继续将同一 `effectiveCollectionIdList` 传入向量库和全文查询。
@@ -943,9 +870,8 @@ flowchart TD
 #### 7.4.2 实现策略
 
 1. `dataset/list` 搜索：
-   - 必须携带 `parentId`（当前路径）。
-   - 查询条件固定 `{ teamId, parentId, deleteTime: null }` + `name/intro` 正则。
-   - 不允许删除 `parentId` 后做全局搜索再截断。
+   - 平铺得到当前目录的可见 Dataset ID 集合后，搜索限定在该可见集合内，匹配 `name/intro` 正则。
+   - 不允许删除当前可见范围做全局搜索再截断；不可追加 `parentId` 条件——平铺会把无权限中间文件夹下的可读 Dataset 提升展示，其真实 `parentId` 可能指向不可见文件夹。
 2. `collection/list` 搜索：
    - 必须携带 `datasetId` 和可选 `parentId`。
    - `searchText` 只匹配当前 `parentId` 下的 collection。
@@ -988,8 +914,7 @@ flowchart TD
 
 ### 10.1 读性能
 
-- folder 权限快照为单表查询。
-- 普通 dataset/collection 鉴权需额外查询父级权限（一次 `getTmbPermission`）。
+- 全快照下，Collection 鉴权/列表/检索均**单表查询自身快照**，不再递归父级。
 - 列表接口使用 `$in` 批量加载 clbs，避免 N+1。
 - 全继承态 dataset 可走短路：跳过逐 collection 解析。
 
@@ -1014,9 +939,9 @@ flowchart TD
 | 移动到根目录 | 需要 `TeamDatasetCreatePermissionVal`；目标父 clbs 为空 |
 | 非继承态 dataset 被 move | 强制改为继承态，旧快照与目标父快照合并 |
 | 父级 owner 在子资源中 | 降级为 manage |
-| 非 folder collection 配置协作者 | 冲突时置 `inheritPermission=false`，不同步子资源 |
-| folder collection 配置协作者 | 全量替换自身 clbs 并同步到继承态子 folder |
-| 恢复继承时父级无权限 | 资源仅保留 owner clb |
+| 非 folder collection 配置协作者 | 冲突时置 `inheritPermission=false`，写独立快照，不同步子资源 |
+| folder collection 配置协作者 | 写完整快照并同步到继承态子 Collection（含非 folder） |
+| 恢复继承时父级无权限 | 资源仅保留自身 clbs（含 owner） |
 | 删除 Collection / Folder / Dataset | 资源与其子树删除时，在同一事务内按 `resourceType + resourceId` 批量清理对应 `resource_permissions`；失败整体回滚，不允许孤儿权限记录 |
 | 只拥有文件权限无知识库权限 | 不展示文件，不展示知识库 |
 
@@ -1029,9 +954,9 @@ flowchart TD
 ### 12.1 升级目标
 
 - 为已有 `dataset_collections` 补充 `inheritPermission=true` 默认值。
-- 将 Dataset 当前有效权限刷入继承态 Collection Folder 的 `resource_permissions`，形成 Folder 权限快照。
+- 将 Dataset 当前有效权限刷入**所有继承态 Collection**（Folder 与非 Folder）的 `resource_permissions`，形成完整有效快照。
 - 为每个 Collection 建立 `resourceType=collection` 的权限记录，并保留 Collection owner 权限；当前方案不写入 `resourceSetId`。
-- 普通 Collection 在继承态下保留 owner 记录，其他权限运行时动态继承 Dataset / Collection Folder；Collection Folder 保存完整继承权限快照。
+- 全快照模型下，普通 Collection 不再依赖运行时动态合并；升级后所有继承态 Collection 都持有 `merge(父级有效 clbs, 自身 clbs)` 快照。
 - 所有存量 Collection 统一初始化为继承态，不存在需要保留的 Collection 独立权限配置。
 - 为每个 Dataset 设置 `hasSetCollectionPermissions=false`（默认值，§6.4.3）：升级初始态无任何 Collection 自定义权限，collection 级鉴权可走短路。
 
@@ -1045,14 +970,14 @@ flowchart TD
 
 ### 12.3 升级处理流程
 
-对每个 Dataset 执行以下步骤：
+对每个 Dataset 执行以下步骤（迁移版本 `COLLECTION_PERMISSION_MIGRATION_VERSION = 2`）：
 
 1. **初始化字段**：为所有存量 Collection 写入 `inheritPermission=true`。升级前 Collection 没有该字段和独立权限语义，因此迁移不保留 `false` 分支。
 2. **创建 owner 记录**：为所有存量 Collection 创建创建者（owner）权限记录（`resource_permissions` 唯一键 upsert，幂等）。
-3. **检测异常数据**：构建 Collection 树检测循环引用和孤儿 `parentId`（循环 folder 会让 `syncChildrenPermission` 成环遍历，须临时退出继承态；孤儿 folder 无法从根可达，按根处理）。
-4. **调用 `syncRootCollectionFolders` 重建 Folder 快照**：根继承态 Collection Folder 并入 Dataset 有效 clbs（owner→manage），经 `syncChildrenPermission` 传播到全部继承态子 Folder——复用与运行时一致的通用原语，避免迁移与运行时同步语义漂移。
-5. **处理孤儿 folder**：孤儿 folder 视为根，直接并入 Dataset 有效 clbs。
-6. **清理和校验**：删除升级过程中生成的重复 owner 记录；校验每个 Collection 的 owner 唯一、所有存量 Collection 均为继承态、Collection Folder 快照与 Dataset 有效 clbs + 自身 owner 一致。
+3. **检测异常数据**：构建 Collection 树检测循环引用和孤儿 `parentId`（循环 folder 会让同步遍历成环，须临时退出继承态；孤儿 folder 无法从根可达，按根处理）。
+4. **调用 `syncRootCollections` 重建根级 Collection 快照**：以 Dataset 有效 clbs 为父级来源，对**所有继承态根 Collection（Folder 与非 Folder）**写入完整快照；Folder 经 `syncCollectionChildrenPermission` 递归，以「父 Folder 旧快照 → 新快照」逐层重建——嵌套全快照模型。
+5. **处理孤儿 Collection**：孤儿 Collection（父级缺失/非 Folder）按根处理，以 Dataset 有效 clbs 为父级来源重建快照；孤儿 Folder 继续递归子节点。
+6. **清理和校验**：删除升级过程中生成的重复 owner 记录；校验每个 Collection 的 owner 唯一、所有存量 Collection 均为继承态、每个继承态 Collection 快照符合嵌套模型 `merge(父级有效 clbs, 自身 clbs)`（自身 clbs 由 `deriveOwnClbs` 反推）。
 7. **提交进度**：每个 Dataset 或固定批次在独立事务中提交升级状态（循环 folder 不标记迁移版本，修复后重跑可再处理）；失败批次记录错误并支持重试，不阻断其他 Dataset。
 
 ### 12.4 权限刷新的具体规则
@@ -1060,17 +985,17 @@ flowchart TD
 | 资源 | `inheritPermission` | 升级时写入内容 | 父级权限变化后的行为 |
 |------|---------------------|----------------|----------------------|
 | Dataset Folder | `true` | 保持现有 Dataset Folder 快照，并按现有逻辑校验/补齐 owner | 由 `syncChildrenPermission` 向下同步继承态 Folder |
-| Collection Folder（存量升级） | `true` | Dataset 有效 clbs（owner→manage）+ 当前 Collection owner | 由 `syncRootCollectionFolders` + `syncChildrenPermission` 重建自身及继承态子 Folder 快照 |
-| 普通 Collection（存量升级） | `true` | 当前 Collection owner；不复制完整父级快照 | 鉴权时动态合并 Dataset / Collection Folder 权限 |
+| Collection Folder（存量升级） | `true` | `merge(Dataset 有效 clbs, 自身 clbs)`（自身 = 从旧快照按旧父级剥离后的 owner + 独立协作者） | `syncRootCollections` + `syncCollectionChildrenPermission` 逐层重建自身及继承态子 Collection 快照 |
+| 普通 Collection（存量升级） | `true` | `merge(Dataset 有效 clbs, 自身 clbs)`（存量仅 owner） | 同上，写入完整有效快照 |
 
 ### 12.5 升级一致性、幂等与回滚
 
 - 升级写入使用 `mongoSessionRun`，Collection 字段、权限快照和迁移状态在同一事务中提交。
 - 权限写入使用 `resourceType + resourceId + tmbId/groupId/orgId` 唯一键和 upsert，重复执行不会产生重复记录。
-- Folder 快照统一复用运行时通用原语 `syncCollaborators` + `syncChildrenPermission`（sumPer 累加、保守删除），与运行时同步一致；非继承态资源不被覆盖。
+- 快照重建复用运行时通用原语（`syncRootCollections` + `syncCollectionChildrenPermission`，`deriveOwnClbs` + 精确 diff），与运行时同步一致；非继承态资源不被覆盖。
 - 建议增加迁移版本号或 `permissionMigrationVersion`，仅处理未完成或版本落后的资源。
 - 单批失败回滚当前批次，并记录 `datasetId / collectionId / error`；下一批可继续执行。
-- 升级完成后执行校验任务：随机抽样比较 Dataset、Collection Folder 快照、普通 Collection 动态解析结果，确认列表、详情和检索鉴权一致。
+- 升级完成后执行校验任务：随机抽样比较每个继承态 Collection 快照是否符合嵌套全快照模型，确认列表、详情和检索鉴权一致。
 
 ---
 
@@ -1079,9 +1004,9 @@ flowchart TD
 ### 13.1 权限解析
 
 - `packages/service/test/support/permission/collection/resolvePermission.test.ts`
-  - 继承态 collection 合并父级权限。
+  - 继承态 collection 直接读自身完整快照。
   - 非继承态 collection 不使用父级权限。
-  - 父级 owner 降级为 manage。
+  - 父级 owner 在快照中降级为 manage。
   - group/org 叠加。
 
 ### 13.2 同步原语
@@ -1115,7 +1040,7 @@ flowchart TD
 | 文件夹穿透 | Folder F 对 U 不可见，F 下 C 对 U 可读 | 调用 list | C 平铺展示，不暴露 F 完整路径 |
 | 知识库门槛 | U 对 Dataset 无 read，对 C 有 read | 调用 detail/list/search | 全部拒绝/不展示 |
 | 当前路径搜索 | parentId=A 下有 D1，parentId=B 下有 D2 | searchKey='test' + parentId=A | 仅返回 D1 |
-| 升级存量权限 | D 下有根 Folder F1、子 Folder F2、普通 C1 | 执行迁移 | F1/F2 获得正确父级快照；F1/F2/C1 均存在唯一 owner 记录；C1 不复制完整父级快照 |
+| 升级存量权限 | D 下有根 Folder F1、子 Folder F2、普通 C1 | 执行迁移 | F1/F2/C1 均获得 `merge(父级有效 clbs, 自身 clbs)` 完整快照，且各自存在唯一 owner 记录 |
 | RAG 文件级过滤 | D 下有 C1(可读)/C2(不可读) | 检索 D | 仅召回 C1 内容 |
 
 ---
@@ -1123,7 +1048,7 @@ flowchart TD
 ## 15. 待确认问题
 
 1. `resumeInheritPermission` 对普通 dataset 是否应删除自身旧 clbs？当前实现仅设置 `inheritPermission=true`。—— 不删除
-2. collection folder 的 `syncChildrenPermission` 是否应同时处理其下的普通 collection？（当前设计：普通 collection 动态合并，不写入快照。）—— no
+2. 普通 collection 是否写入完整快照？—— 是（全快照模型）。父级权限变化时由 `syncCollectionChildrenPermission` diff 重算其快照。
 3. 平铺展示时，是否允许用户通过 URL/ID 反推隐藏路径？—— 报错，无权限
 4. 当前路径搜索是否允许不传 `parentId` 时返回空结果？——不传，就是根路径吧
 
@@ -1134,7 +1059,7 @@ flowchart TD
 ### 16.1 结论
 
 - 采用 `inheritPermission` 继承/非继承模型，统一 dataset 和 collection 的权限语义。
-- folder 资源维护权限快照，普通资源动态合并父级权限。
+- **全快照（方案 C）**：所有继承态 Collection（Folder 与非 Folder）维护完整有效权限快照，鉴权/列表/检索直接读快照。
 - collection 新增 `resourceType=collection` 的独立权限记录。
 - 文件列表、搜索、平铺、检索均基于统一权限解析函数。
 
@@ -1152,17 +1077,24 @@ flowchart TD
 
 ## 附录：关键代码路径
 
-- `packages/service/support/permission/inheritPermission.ts`
+- `packages/service/support/permission/collection/controller.ts`（create / move / updateCollectionCollaborators / deleteCollectionPermissions）
+- `packages/service/support/permission/collection/folderSync.ts`（syncDatasetCollectionFolders / syncRootCollections / syncCollectionChildrenPermission / syncCollectionCollaborators / deriveOwnClbs）
+- `packages/service/support/permission/collection/auth.ts`（resolveCollectionPermission / getReadableCollectionIds / canShortCircuitCollectionPermission / buildPermissionQuery）
+- `packages/service/support/permission/collection/collaborator.ts`（resumeCollectionInheritPermission）
+- `packages/service/support/permission/inheritPermission.ts`（通用 syncChildrenPermission / syncCollaborators / resumeInheritPermission）
 - `packages/service/support/permission/dataset/auth.ts`
 - `packages/service/support/permission/controller.ts`
 - `packages/global/support/permission/utils.ts`
 - `pro/admin/src/service/support/permission/controller.ts`
 - `pro/admin/src/pages/api/core/dataset/collaborator/update.ts`
+- `pro/admin/src/pages/api/core/dataset/collection/collaborator/update.ts`
 - `projects/app/src/pages/api/core/dataset/update.ts`
 - `projects/app/src/pages/api/core/dataset/resumeInheritPermission.ts`
 - `projects/app/src/pages/api/core/dataset/list.ts`
 - `projects/app/src/pages/api/core/dataset/collection/list.ts`
+- `packages/service/core/dataset/search/defaultRecall/collectionPermission.ts`
 - `packages/service/core/dataset/search/defaultRecall/collectionFilter.ts`
+- `packages/service/core/dataset/collection/migrateCollectionPermission.ts`
 - `packages/service/core/dataset/collection/schema.ts`
 - `packages/service/core/dataset/schema.ts`
 - `packages/service/support/permission/schema.ts`

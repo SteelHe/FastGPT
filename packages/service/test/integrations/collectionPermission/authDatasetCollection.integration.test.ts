@@ -9,7 +9,7 @@ import {
 } from '@fastgpt/global/support/permission/constant';
 import { MongoResourcePermission } from '@fastgpt/service/support/permission/schema';
 import { authDatasetCollection } from '@fastgpt/service/support/permission/dataset/auth';
-import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/effectiveCollection';
+import { resolveReadableCollectionIds } from '@fastgpt/service/core/dataset/search/defaultRecall/collectionPermission';
 import { getFakeUsers } from '@test/datas/users';
 import { createCollection, createDataset } from './helpers';
 
