@@ -1,5 +1,4 @@
 import { MongoDatasetData } from '@fastgpt/service/core/dataset/data/schema';
-import { jiebaSplit } from '@fastgpt/service/common/string/jieba/index';
 import { pushCollectionUpdateJob } from '@fastgpt/service/core/dataset/collection/mq';
 import type {
   UpdateDatasetDataPropsType,
@@ -9,7 +8,11 @@ import type {
 import { getEmbeddingModel } from '@fastgpt/service/core/ai/model';
 import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
 import { type ClientSession } from '@fastgpt/service/common/mongo';
-import { MongoDatasetDataText } from '@fastgpt/service/core/dataset/data/dataTextSchema';
+import {
+  writeFullText,
+  deleteFullText,
+  getFullTextStore
+} from '@fastgpt/service/core/dataset/data/textStore';
 import { isS3ObjectKey, removeS3TTL } from '@fastgpt/service/common/s3/utils';
 import { getS3DatasetSource } from '@fastgpt/service/common/s3/sources/dataset';
 import {
@@ -176,19 +179,16 @@ export class DatasetDataOperation {
       { session, ordered: true }
     );
 
-    // 单独维护分词后的全文检索内容，避免查询时临时分词。
-    await MongoDatasetDataText.create(
-      [
-        {
-          teamId,
-          datasetId,
-          collectionId,
-          dataId: _id,
-          fullTextToken: await jiebaSplit({ text: `${indexQ}\n${a}`.trim() })
-        }
-      ],
-      { session, ordered: true }
-    );
+    // 全文检索经统一 facade 写入(engine=mongo 事务内原子;engine=milvus 提交后尽力写 + fullTextPending)。
+    await writeFullText({
+      teamId,
+      datasetId,
+      collectionId,
+      dataId: String(_id),
+      text: `${dataQ}\n${a}`.trim(),
+      indexes: results.map((item) => ({ vectorId: String(item.dataId), text: item.text })),
+      session
+    });
 
     // 图片在创建成功后从临时对象转为正式引用，不再允许 TTL 自动删除。
     if (isS3ObjectKey(imageId, 'dataset')) {
@@ -303,12 +303,16 @@ export class DatasetDataOperation {
       mongoData.indexes = newIndexes;
       await mongoData.save({ session });
 
-      // Q/A 变化会影响全文检索结果，需要和主数据一并更新。
-      await MongoDatasetDataText.updateOne(
-        { dataId: mongoData._id },
-        { fullTextToken: await jiebaSplit({ text: `${mongoData.q}\n${mongoData.a}`.trim() }) },
-        { session }
-      );
+      // Q/A 变化会影响全文检索结果，需要和主数据一并更新(经统一 facade，mongo 事务内原子)。
+      await writeFullText({
+        teamId: String(mongoData.teamId),
+        datasetId: String(mongoData.datasetId),
+        collectionId: String(mongoData.collectionId),
+        dataId: String(mongoData._id),
+        text: `${mongoData.q}\n${mongoData.a}`.trim(),
+        indexes: newIndexes.map((item) => ({ vectorId: String(item.dataId), text: item.text })),
+        session
+      });
 
       // Mongo 已经指向新的 dataId 后再删旧向量，降低检索命中悬空向量 id 的风险。
       await this.indexOperation.deleteVectors({
@@ -431,11 +435,18 @@ export class DatasetDataOperation {
         { session }
       );
 
-      await MongoDatasetDataText.updateOne(
-        { dataId: mongoData._id },
-        { fullTextToken: await jiebaSplit({ text: `${nextQ}\n${nextA}`.trim() }) },
-        { session }
-      );
+      await writeFullText({
+        teamId: String(mongoData.teamId),
+        datasetId: String(mongoData.datasetId),
+        collectionId: String(mongoData.collectionId),
+        dataId: String(mongoData._id),
+        text: `${nextQ}\n${nextA}`.trim(),
+        indexes: nextSystemIndexes.map((item) => ({
+          vectorId: String(item.dataId),
+          text: item.text
+        })),
+        session
+      });
 
       await this.indexOperation.deleteVectors({
         teamId: mongoData.teamId,
@@ -463,7 +474,7 @@ export class DatasetDataOperation {
   async delete(data: DatasetDataItemType) {
     await mongoSessionRun(async (session) => {
       await MongoDatasetData.deleteOne({ _id: data.id }, { session });
-      await MongoDatasetDataText.deleteMany({ dataId: data.id }, { session });
+      await deleteFullText(() => getFullTextStore().deleteByDataId(data.id, session));
 
       // 主数据删除后清理图片对象，避免孤儿文件继续占用存储。
       if (data.imageId && isS3ObjectKey(data.imageId, 'dataset')) {

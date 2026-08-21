@@ -18,6 +18,7 @@ export async function registerNodeInstrumentation() {
       { systemStartCb },
       { initGlobalVariables, getInitConfig, initSystemPluginTags, initAppTemplateTypes },
       { initVectorStore },
+      { initFullTextStore },
       { initRootUser },
       { startMongoWatch },
       { startCron },
@@ -43,6 +44,7 @@ export async function registerNodeInstrumentation() {
       import('@fastgpt/service/common/system/tools'),
       import('@/service/common/system'),
       import('@fastgpt/service/common/vectorDB/controller'),
+      import('@fastgpt/service/core/dataset/data/textStore'),
       import('@/service/mongo'),
       import('@/service/common/system/volumnMongoWatch'),
       import('@/service/common/system/cron'),
@@ -155,6 +157,13 @@ export async function registerNodeInstrumentation() {
         step: 'init-vector-store',
         stage: InitialErrorEnum.VECTORDB_ERROR,
         action: () => initVectorStore(),
+        logger,
+        getErrText
+      }),
+      runInitializationStep({
+        step: 'init-full-text-store',
+        stage: InitialErrorEnum.VECTORDB_ERROR,
+        action: () => initFullTextStore(),
         logger,
         getErrText
       })

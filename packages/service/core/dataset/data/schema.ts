@@ -84,6 +84,7 @@ const DatasetDataSchema = new Schema({
     default: 0
   },
   rebuilding: Boolean,
+  fullTextPending: Boolean,
 
   // Abandon
   fullTextToken: String,

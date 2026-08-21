@@ -2,16 +2,13 @@ import { SearchScoreTypeEnum } from '@fastgpt/global/core/dataset/constants';
 import type {
   DatasetCollectionSchemaType,
   DatasetDataSchemaType,
-  DatasetDataTextSchemaType,
   SearchDataResponseItemType
 } from '@fastgpt/global/core/dataset/type';
-import { jiebaSplit } from '../../../../common/string/jieba/index';
-import { Types } from '../../../../common/mongo';
 import { readFromSecondary } from '../../../../common/mongo/utils';
 import { getLogger, LogCategories } from '../../../../common/logger';
 import { MongoDatasetCollection } from '../../collection/schema';
-import { MongoDatasetDataText } from '../../data/dataTextSchema';
 import { MongoDatasetData } from '../../data/schema';
+import { getFullTextStore, type FullTextSearchItem } from '../../data/textStore';
 import { datasetCollectionSelectField, datasetDataSelectField } from './constant';
 import { buildSearchResultItem, concatRecallLists } from './result';
 
@@ -20,9 +17,10 @@ const logger = getLogger(LogCategories.MODULE.DATASET.DATA);
 type FullTextRecallSource = 'text' | 'imageCaption';
 
 /**
- * 执行 Mongo full-text 召回并按 query 来源分组返回。
- * 目前 full-text 只处理文本类 query：用户文本和图片 caption。原始图片不会进入这里，
- * 因为 Mongo 文本索引无法直接消费图片向量或图片 URL。
+ * 执行 full-text 召回并按 query 来源分组返回。
+ * 底层引擎由 FULL_TEXT_ENGINE 决定(mongo -> $text + jieba;milvus -> BM25)，
+ * 统一走 getFullTextStore().search，结果归一化为 { dataId, collectionId, score }。
+ * 目前 full-text 只处理文本类 query：用户文本和图片 caption。
  */
 export const fullTextRecall = async ({
   teamId,
@@ -59,64 +57,46 @@ export const fullTextRecall = async ({
     };
   }
 
-  const recallResults = await Promise.all(
-    queryTasks.map(async ({ query }) => {
-      return (await MongoDatasetDataText.aggregate(
-        [
-          {
-            $match: {
-              teamId: new Types.ObjectId(teamId),
-              $text: { $search: await jiebaSplit({ text: query }) },
-              datasetId: { $in: datasetIds.map((id) => new Types.ObjectId(id)) },
-              ...(filterCollectionIdList
-                ? {
-                    collectionId: {
-                      $in: filterCollectionIdList
-                        .filter((id) => !forbidCollectionIdList.includes(id))
-                        .map((id) => new Types.ObjectId(id))
-                    }
-                  }
-                : forbidCollectionIdList?.length
-                  ? {
-                      collectionId: {
-                        $nin: forbidCollectionIdList.map((id) => new Types.ObjectId(id))
-                      }
-                    }
-                  : {})
-            }
-          },
-          {
-            $sort: {
-              score: { $meta: 'textScore' }
-            }
-          },
-          {
-            $limit: limit
-          },
-          {
-            $project: {
-              _id: 1,
-              collectionId: 1,
-              dataId: 1,
-              score: { $meta: 'textScore' }
-            }
-          }
-        ],
-        {
-          ...readFromSecondary
-        }
-      )) as (DatasetDataTextSchemaType & { score: number })[];
+  const store = getFullTextStore();
+  const taskItems = await Promise.all(
+    queryTasks.map(async ({ source, query }) => {
+      const items = await store.search({
+        teamId,
+        datasetIds,
+        query,
+        limit,
+        forbidCollectionIdList,
+        filterCollectionIdList
+      });
+      return { source, items };
     })
   );
 
+  return buildResultsFromRecallItems({ taskItems, limit });
+};
+
+/**
+ * 统一结果组装：反查 data/collection、建 item、按 source 分组、concat。
+ * 与 main 现状逻辑保持一致，仅召回来源替换为统一 store。
+ */
+const buildResultsFromRecallItems = async ({
+  taskItems,
+  limit
+}: {
+  taskItems: { source: FullTextRecallSource; items: FullTextSearchItem[] }[];
+  limit: number;
+}): Promise<{
+  textFullTextRecallResults: SearchDataResponseItemType[];
+  imageCaptionFullTextRecallResults: SearchDataResponseItemType[];
+}> => {
   const dataIds = Array.from(
-    new Set(recallResults.map((item) => item.map((item) => item.dataId)).flat())
+    new Set(taskItems.flatMap((t) => t.items.map((r) => r.dataId)).filter(Boolean))
   );
   const collectionIds = Array.from(
-    new Set(recallResults.map((item) => item.map((item) => item.collectionId)).flat())
+    new Set(taskItems.flatMap((t) => t.items.map((r) => r.collectionId)).filter(Boolean))
   );
 
-  // full-text 表只保存 dataId/collectionId/score，展示字段仍回查主 data 与 collection。
+  // full-text 只保存 dataId/collectionId/score，展示字段仍回查主 data 与 collection。
   const [dataMaps, collectionMaps] = await Promise.all([
     MongoDatasetData.find(
       {
@@ -159,11 +139,10 @@ export const fullTextRecall = async ({
     imageCaption: []
   };
 
-  for (const [taskIndex, recallResult] of recallResults.entries()) {
-    const task = queryTasks[taskIndex];
+  for (const task of taskItems) {
     const list = (
       await Promise.all(
-        recallResult.map((item, index) => {
+        task.items.map((item, index) => {
           const collection = collectionMaps.get(String(item.collectionId));
           if (!collection) {
             logger.warn('Dataset collection not found during full-text recall', {

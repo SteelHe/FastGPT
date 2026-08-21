@@ -5,8 +5,8 @@ import { delCollectionRelatedSource } from './collection/controller';
 import { type ClientSession } from '../../common/mongo';
 import { MongoDatasetTraining } from './training/schema';
 import { MongoDatasetData } from './data/schema';
+import { deleteFullText, getFullTextStore } from './data/textStore';
 import { deleteDatasetDataVector } from '../../common/vectorDB/controller';
-import { MongoDatasetDataText } from './data/dataTextSchema';
 import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
 import { retryFn } from '@fastgpt/global/common/system/utils';
 import { UserError } from '@fastgpt/global/common/error/utils';
@@ -96,12 +96,14 @@ export async function delDatasetRelevantData({
     datasetId: { $in: datasetIds }
   });
 
-  // Delete dataset_data_texts in batches by datasetId
+  // Delete full-text data in batches by datasetId(engine=mongo 原子;engine=milvus 尽力)
   for (const datasetId of datasetIds) {
-    await MongoDatasetDataText.deleteMany({
-      teamId,
-      datasetId
-    }).maxTimeMS(300000); // Reduce timeout for single batch
+    await deleteFullText(() =>
+      getFullTextStore().deleteByDatasetIds({
+        teamId: String(teamId),
+        datasetIds: [String(datasetId)]
+      })
+    );
   }
   // Delete dataset_datas in batches by datasetId
   for (const datasetId of datasetIds) {

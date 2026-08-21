@@ -240,11 +240,12 @@ export class MilvusCtrl implements VectorControllerType {
     const searchResult = await retryFn(() =>
       client.search({
         collection_name: DatasetVectorTableName,
-        vector: vector,
+        // SDK 2.6 起 search 使用 data 字段(向量/文本)替代 vector
+        data: [vector],
         limit,
         expr: filterStr,
         output_fields: ['collectionId']
-      })
+      } as any)
     );
 
     const rows = (searchResult.results || []) as {

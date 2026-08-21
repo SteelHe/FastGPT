@@ -201,6 +201,19 @@ export const serviceEnv = createEnv({
     SEEKDB_URL: z.string().optional().meta({ description: 'SeekDB 向量库连接参数' }),
     MILVUS_ADDRESS: z.string().optional().meta({ description: 'Milvus 向量库连接参数' }),
     MILVUS_TOKEN: z.string().optional().meta({ description: 'Milvus 向量库Token' }),
+
+    // ==================== 全文检索 ====================
+    FULL_TEXT_ENGINE: z.enum(['mongo', 'milvus']).default('mongo').meta({
+      description: '全文检索引擎: mongo(默认, 主库 $text) | milvus(Milvus BM25)'
+    }),
+    MILVUS_LANGUAGE_IDENTIFIER: z.enum(['lingua', 'whatlang']).default('lingua').meta({
+      description: 'Milvus 语言识别引擎(BM25 analyzer): lingua(默认) | whatlang'
+    }),
+    MILVUS_FULL_TEXT_SOURCE: z.enum(['data', 'index']).default('data').meta({
+      description:
+        'Milvus 全文集合数据粒度: data(每 dataset_data 一行, 默认) | index(每个 index 一行)'
+    }),
+
     OPENGAUSS_URL: z.string().optional().meta({ description: 'openGauss 向量库连接参数' }),
     HNSW_EF_SEARCH: IntSchema.min(1).default(100).meta({
       description: '向量检索 hnsw ef_search 参数，仅对 PG / OB / OpenGauss 生效'

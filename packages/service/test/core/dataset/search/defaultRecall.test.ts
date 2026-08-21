@@ -11,7 +11,7 @@ const mockRecallFromVectorStore = vi.hoisted(() => vi.fn());
 const mockCreateLLMResponse = vi.hoisted(() => vi.fn());
 const mockMongoDatasetCollectionFind = vi.hoisted(() => vi.fn());
 const mockMongoDatasetDataFind = vi.hoisted(() => vi.fn());
-const mockMongoDatasetDataTextAggregate = vi.hoisted(() => vi.fn());
+const mockFullTextStoreSearch = vi.hoisted(() => vi.fn());
 const mockGetImageBase64 = vi.hoisted(() => vi.fn());
 const mockCountPromptTokens = vi.hoisted(() => vi.fn(async (prompt: string) => prompt.length));
 const mockCountPromptTokensBatch = vi.hoisted(() =>
@@ -74,10 +74,15 @@ vi.mock('@fastgpt/service/core/dataset/data/schema', () => ({
   }
 }));
 
-vi.mock('@fastgpt/service/core/dataset/data/dataTextSchema', () => ({
-  MongoDatasetDataText: {
-    aggregate: mockMongoDatasetDataTextAggregate
-  }
+vi.mock('@fastgpt/service/core/dataset/data/textStore', () => ({
+  getFullTextStore: () => ({
+    init: vi.fn(),
+    write: vi.fn(),
+    deleteByDataId: vi.fn(),
+    deleteByDatasetIds: vi.fn(),
+    deleteByCollectionIds: vi.fn(),
+    search: mockFullTextStoreSearch
+  })
 }));
 
 import { searchDatasetData } from '../../../../core/dataset/search/defaultRecall';
@@ -126,7 +131,7 @@ describe('default recall dataset search', () => {
     mockMongoDatasetDataFind.mockReturnValue({
       lean: vi.fn().mockResolvedValue([])
     });
-    mockMongoDatasetDataTextAggregate.mockResolvedValue([]);
+    mockFullTextStoreSearch.mockResolvedValue([]);
   });
 
   it('should ignore failed image caption and continue dataset search', async () => {
@@ -375,7 +380,7 @@ describe('default recall dataset search', () => {
     });
 
     expect(mockGetVectors).not.toHaveBeenCalled();
-    expect(mockMongoDatasetDataTextAggregate).not.toHaveBeenCalled();
+    expect(mockFullTextStoreSearch).not.toHaveBeenCalled();
     expect(result.searchRes).toEqual([]);
   });
 

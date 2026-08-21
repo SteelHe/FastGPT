@@ -215,6 +215,10 @@ export const DatasetDataSchema = DatasetDataFieldSchema.extend({
   fullTextToken: z.string().meta({ description: '全文 token' }),
   indexes: z.array(DatasetDataIndexItemSchema).meta({ description: '向量索引' }),
   rebuilding: z.boolean().optional().meta({ description: '重建中' }),
+  fullTextPending: z
+    .boolean()
+    .optional()
+    .meta({ description: '全文写入失败标记，由修复任务消费(engine=milvus 时使用)' }),
   imageDescMap: z.record(z.string(), z.string()).optional().meta({ description: '图片描述映射' }),
   metadata: z.record(z.string(), z.any()).optional().meta({ description: '自定义元数据' })
 });

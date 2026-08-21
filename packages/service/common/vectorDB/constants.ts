@@ -2,6 +2,10 @@ import { serviceEnv } from '../../env';
 
 export const DatasetVectorDbName = 'fastgpt';
 export const DatasetVectorTableName = 'modeldata';
+export const DatasetVectorTextTableName = 'modeldata_text';
+
+/** 全文写入的单次底层批量上限：milvus upsert/insert 与 mongo bulkWrite 共用 */
+export const FULL_TEXT_WRITE_BATCH_SIZE = 50;
 
 export const PG_ADDRESS = serviceEnv.PG_URL;
 export const OPENGAUSS_ADDRESS = serviceEnv.OPENGAUSS_URL;
